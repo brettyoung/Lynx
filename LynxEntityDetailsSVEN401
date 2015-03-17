@@ -1,0 +1,1675 @@
+import com.navis.argo.ArgoRefEntity
+import com.navis.argo.ArgoRefField
+import com.navis.argo.ContextHelper
+import com.navis.argo.business.api.ArgoUtils
+import com.navis.argo.business.api.GroovyApi
+import com.navis.argo.business.api.ServicesManager
+import com.navis.argo.business.atoms.*
+import com.navis.argo.business.model.CarrierVisit
+import com.navis.argo.business.model.Complex
+import com.navis.argo.business.model.Facility
+import com.navis.argo.business.model.VisitDetails
+import com.navis.argo.business.reference.*
+import com.navis.cargo.business.model.BillOfLading
+import com.navis.cargo.business.model.GoodsBl
+import com.navis.framework.business.Roastery
+import com.navis.framework.business.atoms.LifeCycleStateEnum
+import com.navis.framework.persistence.HibernateApi
+import com.navis.framework.portal.Ordering
+import com.navis.framework.portal.UserContext
+import com.navis.framework.portal.query.DomainQuery
+import com.navis.framework.portal.query.PredicateFactory
+import com.navis.framework.portal.query.QueryFactory
+import com.navis.framework.presentation.internationalization.MessageTranslator
+import com.navis.framework.query.common.api.QueryResult
+import com.navis.inventory.InventoryEntity
+import com.navis.inventory.PoolsEntity
+import com.navis.inventory.business.api.UnitField
+import com.navis.inventory.business.api.UnitFinder
+import com.navis.inventory.business.atoms.EqDamageSeverityEnum
+import com.navis.inventory.business.atoms.UfvTransitStateEnum
+import com.navis.inventory.business.imdg.HazardItem
+import com.navis.inventory.business.imdg.Hazards
+import com.navis.inventory.business.imdg.ImdgClass
+import com.navis.inventory.business.pools.Pool
+import com.navis.inventory.business.units.*
+import com.navis.orders.business.atoms.EquipmentOrderDispatchReservedEnum
+import com.navis.orders.business.eqorders.Booking
+import com.navis.orders.business.eqorders.EquipmentOrderItem
+import com.navis.road.RoadEntity
+import com.navis.road.RoadField
+import com.navis.road.business.atoms.TranStatusEnum
+import com.navis.road.business.atoms.TranSubTypeEnum
+import com.navis.road.business.model.Document
+import com.navis.road.business.model.DocumentMessage
+import com.navis.road.business.model.TruckTransaction
+import com.navis.services.ServicesEntity
+import com.navis.services.ServicesField
+import com.navis.services.business.event.Event
+import com.navis.services.business.rules.EventType
+import com.navis.services.business.rules.ServiceImpediment
+import com.navis.services.business.rules.Veto
+import com.navis.vessel.VesselEntity
+import com.navis.vessel.api.VesselVisitField
+import com.navis.vessel.business.schedule.VesselVisitDetails
+import groovy.sql.Sql
+
+import java.text.DateFormat
+import java.text.SimpleDateFormat
+
+class LynxEntityDetails extends GroovyApi {
+    public String execute(Map inParameters) {
+
+        String url = 'jdbc:oracle:thin:@10.128.2.78:1521:INVENTORY'
+        String user = 'gltinv'
+        String password = 'sparcsn4'
+        String driverClassName = 'oracle.jdbc.OracleDriver'
+
+
+        Facility facility = ContextHelper.getThreadFacility()
+        Complex complex = ContextHelper.getThreadComplex()
+        String gKeyParam = inParameters.get("Gkey")
+        String bookingNbrParam = inParameters.get("Booking")
+        String billNbrParam = inParameters.get("Bills of Lading")
+        String lineParam = inParameters.get("Line")
+        String vesselParam = inParameters.get("Vessel")
+        String voyageParam = inParameters.get("Voyage")
+        String hazClassParam = inParameters.get("Hazard Class")
+        String undgParam = inParameters.get("UNDG")
+        String eqNbrParam = inParameters.get("Container")
+        String polParam = inParameters.get("Port of Load")
+        String podParam = inParameters.get("Port of Discharge")
+        String fromDateParam = inParameters.get("From Date")
+        String toDateParam = inParameters.get("To Date")
+        String equipClassParam = inParameters.get("Equipment Class")
+        String verifyParam = inParameters.get("Verified")
+        String organizationParam = inParameters.get("Organization")
+        String shipperParam = inParameters.get("Shipper")
+        String etaParam = inParameters.get("ETA")
+        String directionParam = inParameters.get("Direction")
+        String tranNbrParam = inParameters.get("Transaction Nbr")
+        String truckIdParam = inParameters.get("Truck License Nbr")
+        String truckingCoParam = inParameters.get("Trucking Company")
+        String tranTypeParam = inParameters.get("Transaction Type")
+        String tranStatusParam = inParameters.get("Transaction Status")
+        String tranGkeyParam = inParameters.get("Transaction Gkey")
+        String docGkeyParam = inParameters.get("Document Gkey")
+        String shippingLineParam = inParameters.get("Shipping Line")
+        String userParam = inParameters.get("User")
+        String gvyClassParam = inParameters.get("Groovy Class")
+
+        UserContext context = ContextHelper.getThreadUserContext()
+        Date timeNow = ArgoUtils.convertDateToLocalDateTime(ArgoUtils.timeNow(), context.getTimeZone())
+
+        if (gvyClassParam.toUpperCase().equals("BOOKINGLISTBYNBR")) {
+            List bookingList = Booking.findBookingsByNbr(bookingNbrParam)
+
+            if (bookingList.isEmpty()) {
+                return "Error:  No Booking Found"
+            } else {
+
+                StringBuilder results = new StringBuilder()
+
+                for (Booking booking in bookingList) {
+
+                    String[] lineArr = lineParam.toUpperCase().split(",")
+                    for (String line : lineArr) {
+                        if (!booking.getEqoLine().getBzuId().equalsIgnoreCase(line)) {
+                            continue
+                        }
+
+                        ScopedBizUnit lineOperator = booking.getEqoLine()
+                        CarrierVisit visit = booking.getEqoVesselVisit()
+                        VisitDetails visitDetails = visit.getCvCvd()
+                        VesselVisitDetails vesselVisitDetails = VesselVisitDetails.loadByGkey(visitDetails.getPrimaryKey().toString().toLong())
+                        RoutingPoint pod = booking.getEqoPod1()
+                        RoutingPoint pol = booking.getEqoPol()
+                        UnLocCode unDischarge = pod.getPointUnLoc()
+                        UnLocCode unLoad = pol.getPointUnLoc()
+                        SpecialStow specialStow = booking.getEqoSpecialStow()
+                        String stowId = (specialStow == null) ? "" : specialStow.getStwId()
+                        Hazards hazards = booking.getEqoHazards()
+                        String hazFlag = (hazards == null) ? "0" : "1"
+                        String hazClass = (hazards == null) ? "" : hazards.getWorstHazardClass()
+                        EquipmentOrderDispatchReservedEnum dispatchReserved = booking.getEqoDispatchReserved()
+                        String reserved = (dispatchReserved == null) ? "" : dispatchReserved.getKey()
+                        Date hazCutoff = vesselVisitDetails.getVvdTimeHazCutoff()
+                        Date reefCutoff = vesselVisitDetails.getVvdTimeReeferCutoff()
+                        Date cargoCutoff = vesselVisitDetails.getVvdTimeCargoCutoff()
+
+                        Date[] cutoffs
+                        cutoffs = new Date[3]
+                        cutoffs[0] = hazCutoff
+                        cutoffs[1] = reefCutoff
+                        cutoffs[2] = cargoCutoff
+                        cutoffs.sort()
+
+                        results.append("<TABLE>")
+                                .append("<GKEY>").append(booking.getEqboGkey()).append("</GKEY>")
+                                .append("<NBR>").append(booking.getEqboNbr()).append("</NBR>")
+                                .append("<SHIPPINGLINE>").append(lineOperator.getBzuId()).append("</SHIPPINGLINE>")
+                                .append("<SHIPPINGLINEDETAILS>").append(lineOperator.getBzuName()).append("</SHIPPINGLINEDETAILS>")
+                                .append("<VESSEL>").append(visit.getCarrierVehicleId()).append("</VESSEL>")
+                                .append("<VESSELDETAILS>").append(visit.getCarrierVehicleName()).append("</VESSELDETAILS>")
+                                .append("<VOAYGE>").append(visit.getCarrierObVoyNbrOrTrainId()).append("</VOAYGE>")
+                                .append("<CALL>").append(visit.getCarrierObVisitCallNbr()).append("</CALL>")
+                                .append("<PORTOFLOAD>").append(pol.getPointId()).append("</PORTOFLOAD>")
+                                .append("<POLDESCRIPTION>").append(unLoad.getUnlocPlaceName()).append("</POLDESCRIPTION>")
+                                .append("<PORTOFDISCHARGE>").append(pod.getPointId()).append("</PORTOFDISCHARGE>")
+                                .append("<PODDESCRIPTION>").append(unDischarge.getUnlocPlaceName()).append("</PODDESCRIPTION>")
+                                .append("<SHIPPER>").append(booking.getShipperAsString()).append("</SHIPPER>")
+                                .append("<CONSIGNEE>").append(booking.getConsigneeAsString()).append("</CONSIGNEE>")
+                                .append("<ORIGIN>").append(booking.getEqoOrigin()).append("</ORIGIN>")
+                                .append("<DESTINATION>").append(booking.getEqoDestination()).append("</DESTINATION>")
+                                .append("<SPECIAL_STOW>").append(stowId).append("</SPECIAL_STOW>")
+                                .append("<HAZFL>").append(hazFlag).append("</HAZFL>")
+                                .append("<HAZARD_CLASS>").append(hazClass).append("</HAZARD_CLASS>")
+                                .append("<STATUS>").append(booking.getEqoEqStatus().getKey()).append("</STATUS>")
+                                .append("<NOTES>").append(booking.getEqoNotes()).append("</NOTES>")
+                                .append("<HOLDPARTIALFL>").append(booking.getEqoHoldPartials()).append("</HOLDPARTIALFL>")
+                                .append("<RESERVEDONLYFL>").append(reserved).append("</RESERVEDONLYFL>")
+                                .append("<MILITARYBOOKINGFL>").append(booking.getEqoMilitaryTcn()).append("</MILITARYBOOKINGFL>")
+                                .append("<OOGFL>").append(booking.getEqoOod()).append("</OOGFL>")
+                                .append("<CARGO_CUTOFF>").append(vesselVisitDetails.getVvdTimeCargoCutoff()).append("</CARGO_CUTOFF>")
+                                .append("<REEFER_CUTOFF>").append(vesselVisitDetails.getVvdTimeReeferCutoff()).append("</REEFER_CUTOFF>")
+                                .append("<HAZARDOUS_CUTOFF>").append(vesselVisitDetails.getVvdTimeHazCutoff()).append("</HAZARDOUS_CUTOFF>")
+                                .append("<MINCUT>").append(cutoffs[0]).append("</MINCUT>")
+                                .append("<MAXCUT>").append(cutoffs[2]).append("</MAXCUT>")
+                                .append("</TABLE>")
+                    }
+                }
+                return results.toString().replace("null", "")
+            }
+        } else if (gvyClassParam.toUpperCase().equals("BOOKINGLISTBYGKEY")) {
+
+            Booking booking = Booking.hydrate(gKeyParam)
+            StringBuilder results = new StringBuilder()
+
+            ScopedBizUnit lineOperator = booking.getEqoLine()
+            CarrierVisit visit = booking.getEqoVesselVisit()
+            VisitDetails visitDetails = visit.getCvCvd()
+            VesselVisitDetails vesselVisitDetails = VesselVisitDetails.loadByGkey(visitDetails.getPrimaryKey().toString().toLong())
+            RoutingPoint pod = booking.getEqoPod1()
+            String pod2 = (booking.getEqoPod2() == null) ? "" : booking.getEqoPod2().getPointId()
+            RoutingPoint pol = booking.getEqoPol()
+            UnLocCode unDischarge = pod.getPointUnLoc()
+            String podDescription2 = (pod2 == "") ? "" : booking.getEqoPod2().getPointUnLoc().getUnlocPlaceName()
+            UnLocCode unLoad = pol.getPointUnLoc()
+            SpecialStow specialStow = booking.getEqoSpecialStow()
+            String stowId = (specialStow == null) ? "" : specialStow.getStwId()
+            SpecialStow specialStow2 = booking.getEqoSpecialStow2()
+            String stowId2 = (specialStow2 == null) ? "" : specialStow2.getStwId()
+            SpecialStow specialStow3 = booking.getEqoSpecialStow3()
+            String stowId3 = (specialStow3 == null) ? "" : specialStow3.getStwId()
+            Hazards hazards = booking.getEqoHazards()
+            String hazFlag = (hazards == null) ? "0" : "1"
+            String hazClass = (hazards == null) ? "" : hazards.getWorstHazardClass()
+            EquipmentOrderDispatchReservedEnum dispatchReserved = booking.getEqoDispatchReserved()
+            String reserved = (dispatchReserved == null) ? "" : dispatchReserved.getKey()
+            DrayStatusEnum drayEnum = booking.getEqoDrayOff()
+            String drayStatus = (drayEnum == null) ? "" : drayEnum.getKey()
+            String holdName = (booking.getOrdersAppliedHoldOrPermName() == null) ? "0" : "1"
+            ScopedBizUnit trucker = booking.getEqoTruckCo()
+            String truckId = (trucker == null) ? "" : trucker.getBzuId()
+            String truckName = (trucker == null) ? "" : trucker.getBzuName()
+            String locked
+            if (booking.getEqoTallyReceive() > 0) {
+                locked = "1"
+            } else {
+                locked = "0"
+            }
+
+            results.append("<TABLE>")
+                    .append("<GKEY>").append(booking.getEqboGkey()).append("</GKEY>")
+                    .append("<NBR>").append(booking.getEqboNbr()).append("</NBR>")
+                    .append("<SHIPPINGLINE>").append(lineOperator.getBzuId()).append("</SHIPPINGLINE>")
+                    .append("<SHIPPINGLINEDETAILS>").append(lineOperator.getBzuName()).append("</SHIPPINGLINEDETAILS>")
+                    .append("<VESSEL>").append(visit.getCarrierVehicleId()).append("</VESSEL>")
+                    .append("<VESSELDETAILS>").append(visit.getCarrierVehicleName()).append("</VESSELDETAILS>")
+                    .append("<VOYAGE>").append(visit.getCarrierObVoyNbrOrTrainId()).append("</VOYAGE>")
+                    .append("<CALL>").append(visit.getCarrierObVisitCallNbr()).append("</CALL>")
+                    .append("<PORTOFLOAD>").append(pol.getPointId()).append("</PORTOFLOAD>")
+                    .append("<POLDESCRIPTION>").append(unLoad.getUnlocPlaceName()).append("</POLDESCRIPTION>")
+                    .append("<PORTOFDISCHARGE>").append(pod.getPointId()).append("</PORTOFDISCHARGE>")
+                    .append("<PODDESCRIPTION>").append(unDischarge.getUnlocPlaceName()).append("</PODDESCRIPTION>")
+                    .append("<PORTOFDISCHARGE2>").append(pod2).append("</PORTOFDISCHARGE2>")
+                    .append("<PODDESCRIPTION2>").append(podDescription2).append("</PODDESCRIPTION2>")
+                    .append("<SHIPPER>").append(booking.getShipperAsString()).append("</SHIPPER>")
+                    .append("<CONSIGNEE>").append(booking.getConsigneeAsString()).append("</CONSIGNEE>")
+                    .append("<ORIGIN>").append(booking.getEqoOrigin()).append("</ORIGIN>")
+                    .append("<DESTINATION>").append(booking.getEqoDestination()).append("</DESTINATION>")
+                    .append("<DESTINATIONDESCRIPTION>").append("</DESTINATIONDESCRIPTION>")
+                    .append("<SPECIAL_STOW>").append(stowId).append("</SPECIAL_STOW>")
+                    .append("<SPECIAL_STOW2>").append(stowId2).append("</SPECIAL_STOW2>")
+                    .append("<SPECIAL_STOW3>").append(stowId3).append("</SPECIAL_STOW3>")
+                    .append("<HAZFL>").append(hazFlag).append("</HAZFL>")
+                    .append("<HAZARD_CLASS>").append(hazClass).append("</HAZARD_CLASS>")
+                    .append("<STATUS>").append(booking.getEqoEqStatus().getKey()).append("</STATUS>")
+                    .append("<NOTES>").append(booking.getEqoNotes()).append("</NOTES>")
+                    .append("<HOLDPARTIALFL>").append(booking.getEqoHoldPartials()).append("</HOLDPARTIALFL>")
+                    .append("<RESERVEDONLYFL>").append(reserved).append("</RESERVEDONLYFL>")
+                    .append("<MILITARYBOOKINGFL>").append(booking.getEqoMilitaryTcn()).append("</MILITARYBOOKINGFL>")
+                    .append("<MILITARY_TCN>").append(booking.getEqoMilitaryTcn()).append("</MILITARY_TCN>")
+                    .append("<OOGFL>").append(booking.getEqoOod()).append("</OOGFL>")
+                    .append("<CARGO_CUTOFF>").append(vesselVisitDetails.getVvdTimeCargoCutoff()).append("</CARGO_CUTOFF>")
+                    .append("<REEFER_CUTOFF>").append(vesselVisitDetails.getVvdTimeReeferCutoff()).append("</REEFER_CUTOFF>")
+                    .append("<HAZARDOUS_CUTOFF>").append(vesselVisitDetails.getVvdTimeHazCutoff()).append("</HAZARDOUS_CUTOFF>")
+                    .append("<TRUCKER_ID>").append(truckId).append("</TRUCKER_ID>")
+                    .append("<CUSTOMER_PRIORITY>").append("</CUSTOMER_PRIORITY>")
+                    .append("<REFERENCE_NBR>").append(booking.getEqoClientRefNo()).append("</REFERENCE_NBR>")
+                    .append("<BLOCK_ID>").append(booking.getEqoStowBlock()).append("</BLOCK_ID>")
+                    .append("<POOL_MEMBER>").append("</POOL_MEMBER>")
+                    .append("<NO_EMPTY_OUT>").append("</NO_EMPTY_OUT>")
+                    .append("<NO_FULL_IN>").append("</NO_FULL_IN>")
+                    .append("<ASSIGNEDTRUCK>").append(truckName).append("</ASSIGNEDTRUCK>")
+                    .append("<HOLDFL>").append(holdName).append("</HOLDFL>")
+                    .append("<DISPATCH_RESERVED>").append(reserved).append("</DISPATCH_RESERVED>")
+                    .append("<DRAY_STATUS>").append(drayStatus).append("</DRAY_STATUS>")
+                    .append("<STOW_BLOCK>").append(booking.getEqoStowBlock()).append("</STOW_BLOCK>")
+                    .append("<LOCKED>").append(locked).append("</LOCKED>")
+                    .append("</TABLE>")
+
+            return results.toString().replace("null", "")
+        } else if (gvyClassParam.toUpperCase().equals("REFVESSELS")) {
+
+            //ScopedBizUnit lineOperator = ScopedBizUnit.findEquipmentOperator(lineParam)
+            StringBuilder results = new StringBuilder()
+            String[] lineArr = lineParam.toUpperCase().split(",")
+            DateFormat formatter = new SimpleDateFormat("dd-MMM-yy")
+            Date etaDate = (etaParam == null) ? null : (Date) formatter.parse(etaParam)
+            DomainQuery dq
+            if (etaDate == null) {
+                dq = QueryFactory.createDomainQuery(VesselEntity.VESSEL_VISIT_DETAILS)
+                        .setDqFieldsDistinct()
+            } else {
+                dq = QueryFactory.createDomainQuery(VesselEntity.VESSEL_VISIT_DETAILS)
+                        .addDqPredicate(PredicateFactory.gt(VesselVisitField.VVD_E_T_A, etaDate))
+                        .setDqFieldsDistinct()
+            }
+
+            Set<VesselVisitDetails> vesselVisitDetailsSet = HibernateApi.getInstance().findEntitiesByDomainQuery(dq)
+            List<String> vessels = new ArrayList<String>()
+            for (VesselVisitDetails vvd in vesselVisitDetailsSet) {
+                for (String line : lineArr) {
+                    if (vvd.getVvlineForBizu(ScopedBizUnit.findEquipmentOperator(line)) == null) {
+                        continue
+                    }
+                    String ves = vvd.getCarrierVehicleName() + "-" + vvd.getCarrierVehicleId()
+                    if (!vessels.contains(ves)) {
+                        vessels.add(ves)
+                    }
+                }
+            }
+            Collections.sort(vessels)
+            for (String vessel in vessels) {
+                String name = vessel.substring(0, vessel.indexOf("-"))
+                String id = vessel.substring(vessel.indexOf("-") + 1)
+                results.append("<TABLE>")
+                        .append("<VESSEL>").append(id).append("</VESSEL>")
+                        .append("<VESSELNAME>").append(name).append("</VESSELNAME>")
+                        .append("</TABLE>")
+            }
+            return results.toString().replace("null", "")
+        } else if (gvyClassParam.toUpperCase().equals("REFVESSELVOYAGES")) {
+
+            StringBuilder results = new StringBuilder()
+            String[] lineArr = lineParam.toUpperCase().split(",")
+
+            DomainQuery dq = QueryFactory.createDomainQuery(VesselEntity.VESSEL_VISIT_DETAILS)
+                    .setDqFieldsDistinct()
+                    .addDqPredicate(PredicateFactory.eq(VesselVisitField.VVD_VESSEL_ID, vesselParam))
+
+            Set<VesselVisitDetails> vesselVisitDetailsSet = HibernateApi.getInstance().findEntitiesByDomainQuery(dq)
+            List<String> voyages = new ArrayList<String>()
+            for (VesselVisitDetails vvd in vesselVisitDetailsSet) {
+                for (String line : lineArr) {
+                    if (vvd.getVvlineForBizu(ScopedBizUnit.findEquipmentOperator(line)) == null) {
+                        continue
+                    }
+                    String voy
+                    if (directionParam.toUpperCase().equals("IN")) {
+                        voy = vvd.getCarrierIbVoyNbrOrTrainId()
+                    } else {
+                        voy = vvd.getCarrierObVoyNbrOrTrainId()
+                    }
+                    if (!voyages.contains(voy)) {
+                        voyages.add(voy)
+                    }
+                }
+            }
+            Collections.sort(voyages)
+            for (String voyage in voyages) {
+                results.append("<TABLE>")
+                        .append("<VOYAGE>").append(voyage).append("</VOYAGE>")
+                        .append("</TABLE>")
+            }
+
+            return results.toString().replace("null", "")
+        } else if (gvyClassParam.toUpperCase().equals("REFVESSELVOYAGELOC")) {
+
+            StringBuilder results = new StringBuilder()
+
+            DomainQuery dq = QueryFactory.createDomainQuery(VesselEntity.VESSEL_VISIT_DETAILS)
+                    .setDqFieldsDistinct()
+                    .addDqPredicate(PredicateFactory.eq(VesselVisitField.VVD_OB_VYG_NBR, voyageParam))
+                    .addDqPredicate(PredicateFactory.eq(VesselVisitField.VVD_VESSEL_ID, vesselParam))
+
+            Set<VesselVisitDetails> vesselVisitDetailsSet = HibernateApi.getInstance().findEntitiesByDomainQuery(dq)
+            for (VesselVisitDetails vvd in vesselVisitDetailsSet) {
+                CarrierItinerary carrierItinerary = vvd.getCvdItinerary()
+                List points = carrierItinerary.getItinPoints()
+                for (PointCall pointCall in points) {
+                    results.append("<TABLE>")
+                            .append("<PK>").append(pointCall.getCallPoint().getPointGkey()).append("</PK>")
+                            .append("<PORTOFDISCHARGE>").append(pointCall.getCallPoint().getPointId()).append("</PORTOFDISCHARGE>")
+                            .append("<PODDESCRIPTION>").append(pointCall.getCallPoint().getPointUnLoc().getUnlocPlaceName()).append("</PODDESCRIPTION>")
+                            .append("</TABLE>")
+                }
+
+            }
+            return results.toString().replace("null", "")
+        } else if (gvyClassParam.toUpperCase().equals("REFSPECIALSTOWS")) {
+
+            StringBuilder results = new StringBuilder()
+
+            DomainQuery dq = QueryFactory.createDomainQuery(ArgoRefEntity.SPECIAL_STOW)
+                    .setDqFieldsDistinct()
+
+            Set<SpecialStow> specialStowSet = HibernateApi.getInstance().findEntitiesByDomainQuery(dq)
+            for (SpecialStow specialStow in specialStowSet) {
+                results.append("<TABLE>")
+                        .append("<ID>").append(specialStow.getStwId()).append("</ID>")
+                        .append("<DESCRIPTION>").append(specialStow.getStwDescription()).append("</DESCRIPTION>")
+                        .append("</TABLE>")
+            }
+            return results.toString().replace("null", "")
+        } else if (gvyClassParam.toUpperCase().equals("REFTRUCKINGCOMPANIES")) {
+
+            StringBuilder results = new StringBuilder()
+
+            DomainQuery dq = QueryFactory.createDomainQuery(ArgoRefEntity.SCOPED_BIZ_UNIT)
+                    .setDqFieldsDistinct()
+                    .addDqPredicate(PredicateFactory.eq(ArgoRefField.BZU_ROLE, BizRoleEnum.HAULIER))
+
+            Set<ScopedBizUnit> scopedBizUnitSet = HibernateApi.getInstance().findEntitiesByDomainQuery(dq)
+            TreeSet<ScopedBizUnit> treeSet = new TreeSet<ScopedBizUnit>(new ScopedBizUnitComparator())
+            treeSet.addAll(scopedBizUnitSet)
+            for (ScopedBizUnit scopedBizUnit in treeSet) {
+                results.append("<TABLE>")
+                        .append("<ID>").append(scopedBizUnit.getBzuId()).append("</ID>")
+                        .append("<SCAC>").append(scopedBizUnit.getBzuScac()).append("</SCAC>")
+                        .append("<DESCRIPTION>").append(scopedBizUnit.getBzuName()).append("</DESCRIPTION>")
+                        .append("</TABLE>")
+            }
+            return results.toString().replace("null", "")
+        } else if (gvyClassParam.toUpperCase().equals("REFSHIPPINGLINES")) {
+            StringBuilder results = new StringBuilder()
+            DomainQuery dq = QueryFactory.createDomainQuery(ArgoRefEntity.LINE_OPERATOR)
+                    .addDqField(ArgoRefField.BZU_ID)
+                    .addDqField(ArgoRefField.BZU_NAME)
+                    .addDqField(ArgoRefField.BZU_SCAC)
+                    .addDqPredicate(PredicateFactory.eq(ArgoRefField.BZU_ROLE, BizRoleEnum.LINEOP))
+                    .addDqOrdering(Ordering.asc(ArgoRefField.BZU_ID))
+            QueryResult rs = HibernateApi.getInstance().findValuesByDomainQuery(dq)
+            List records = rs.getRetrievedResults()
+            for (int i = 0; i < records.size(); i++) {
+                String lineId = rs.getValue(i, 0)
+                String lineName = rs.getValue(i, 1)
+                String lineScac = rs.getValue(i, 2)
+                if (lineName)
+                lineName = lineName.replace(",","")
+
+                results.append("<TABLE>")
+                        .append("<LINEID>").append(lineId).append("</LINEID>")
+                        .append("<DISPLAYNAME>").append(lineName).append("</DISPLAYNAME>")
+                        .append("<LINECODE>").append(lineScac).append("</LINECODE>")
+                        .append("</TABLE>")
+            }
+            return results.toString().replace("null", "")
+        } else if (gvyClassParam.toUpperCase().equals("REFOTHERORGANIZATIONS")) {
+            StringBuilder results = new StringBuilder()
+            DomainQuery dq = QueryFactory.createDomainQuery(ArgoRefEntity.SCOPED_BIZ_UNIT)
+                    .addDqField(ArgoRefField.BZU_ID)
+                    .addDqField(ArgoRefField.BZU_NAME)
+                    .addDqPredicate(PredicateFactory.eq(ArgoRefField.BZU_ROLE, BizRoleEnum.MISC))
+                    .addDqPredicate(PredicateFactory.like(ArgoRefField.BZU_NAME, '%' + organizationParam.toUpperCase() + '%'))
+                    .addDqOrdering(Ordering.asc(ArgoRefField.BZU_ID))
+            QueryResult rs = HibernateApi.getInstance().findValuesByDomainQuery(dq)
+            List records = rs.getRetrievedResults()
+            for (int i = 0; i < Math.min(10, records.size()); i++) {
+                String id = rs.getValue(i, 0)
+                String name = rs.getValue(i, 1)
+                results.append("<TABLE>")
+                        .append("<ID>").append(id).append("</ID>")
+                        .append("<NAME>").append(name).append("</NAME>")
+                        .append("</TABLE>")
+            }
+            return results.toString().replace("null", "")
+        } else if (gvyClassParam.toUpperCase().equals("GUARANTEELIMIT")) {
+            StringBuilder results = new StringBuilder()
+            ScopedBizUnit organization = ScopedBizUnit.findScopedBizUnit(organizationParam, BizRoleEnum.MISC)
+            if (organization.getBzuCreditStatus().equals(CreditStatusEnum.OAC)) {
+                results.append("<TABLE>")
+                        .append("<GUARANTEELIMIT>").append(organization.getBzuPerUnitGuaranteeLimit()).append("</GUARANTEELIMIT>")
+                        .append("</TABLE>")
+            } else {
+                return "Error:  Organization Not Approved"
+            }
+            return results.toString().replace("null", "")
+        } else if (gvyClassParam.toUpperCase().equals("BOOKINGEQUIPMENTDETAILS")) {
+            Booking booking = Booking.hydrate(gKeyParam)
+            StringBuilder results = new StringBuilder()
+            Set<EquipmentOrderItem> orderItemSet = booking.getEqboOrderItems()
+            for (EquipmentOrderItem orderItem in orderItemSet) {
+                EquipGrade grade = orderItem.getEqoiEqGrade()
+                String gradeId = (grade == null) ? "" : grade.getEqgrdId()
+                VentUnitEnum ventEnum = orderItem.getEqoiVentUnit()
+                String ventUnits = (ventEnum == null) ? "" : ventEnum.getKey()
+
+                results.append("<TABLE>")
+                        .append("<PK>").append(orderItem.getEqboiGkey()).append("</PK>")
+                        .append("<GKEY>").append(gKeyParam).append("</GKEY>")
+                        .append("<EQSZ>").append(orderItem.getEqoiEqSize().getKey()).append("</EQSZ>")
+                        .append("<EQTP>").append(orderItem.getEqoiEqIsoGroup().getKey()).append("</EQTP>")
+                        .append("<EQHT>").append(orderItem.getEqoiEqHeight().getKey()).append("</EQHT>")
+                        .append("<QTY>").append(orderItem.getEqoiQty()).append("</QTY>")
+                        .append("<TALLY>").append(orderItem.getEqoiTally()).append("</TALLY>")
+                        .append("<TALLYLIMIT>").append(orderItem.getEqoiTallyLimit()).append("</TALLYLIMIT>")
+                        .append("<RECQTY>").append(orderItem.getEqoiTallyReceive()).append("</RECQTY>")
+                        .append("<COMMODITY>").append(orderItem.getEqoiCommodity()).append("</COMMODITY>")
+                        .append("<COMMODITYDETAILS>").append(orderItem.getEqoiCommodityDesc()).append("</COMMODITYDETAILS>")
+                        .append("<TEMPREQUIRED>").append(orderItem.getEqoiTempRequired()).append("</TEMPREQUIRED>")
+                        .append("<TEMPUNITS>").append("</TEMPUNITS>")
+                        .append("<VENTREQUIRED>").append(orderItem.getEqoiVentRequired()).append("</VENTREQUIRED>")
+                        .append("<VENTUNITS>").append(ventUnits).append("</VENTUNITS>")
+                        .append("<HUMIDITY>").append(orderItem.getEqoiHumidityRequired()).append("</HUMIDITY>")
+                        .append("<GRADE_ID>").append(gradeId).append("</GRADE_ID>")
+                        .append("</TABLE>")
+            }
+            return results.toString().replace("null", "").replace("NOM", "")
+
+        } else if (gvyClassParam.toUpperCase().equals("REFEQUIPMENTTYPE")) {
+
+            StringBuilder results = new StringBuilder()
+
+            DomainQuery dq = QueryFactory.createDomainQuery(ArgoRefEntity.EQUIP_TYPE)
+                    .addDqField(ArgoRefField.EQTYP_NOMINAL_LENGTH)
+                    .addDqField(ArgoRefField.EQTYP_ISO_GROUP)
+                    .addDqField(ArgoRefField.EQTYP_NOMINAL_HEIGHT)
+                    .addDqField(ArgoRefField.EQTYP_DESCRIPTION)
+                    .addDqField(ArgoRefField.EQTYP_IS_TEMPERATURE_CONTROLLED)
+                    .setDqFieldsDistinct()
+
+            QueryResult rs = HibernateApi.getInstance().findValuesByDomainQuery(dq)
+            List records = rs.getRetrievedResults()
+            List<String> equips = new ArrayList<String>()
+            for (int i = 0; i < records.size(); i++) {
+                EquipNominalLengthEnum nomLength = rs.getValue(i, 0)
+                EquipIsoGroupEnum isoGroup = rs.getValue(i, 1)
+                EquipNominalHeightEnum nomHeight = rs.getValue(i, 2)
+                String eqTypeDesc = rs.getValue(i, 3)
+                Boolean tempControl = rs.getValue(i, 4)
+                String equip = nomLength.getKey() + isoGroup.getKey() + nomHeight.getKey() + "/" + nomLength.getKey() + isoGroup.getKey() + nomHeight.getKey() + " - " + eqTypeDesc + "/" + tempControl.toString()
+                if (!equips.contains(equip)) {
+                    equips.add(equip)
+                }
+            }
+            Collections.sort(equips)
+            for (String eq in equips) {
+                String id = eq.substring(0, eq.indexOf("/"))
+                String description = eq.substring(eq.indexOf("/") + 1, eq.indexOf("/", eq.indexOf("/") + 1))
+                String temp = eq.substring(eq.indexOf("/", eq.indexOf("/") + 1) + 1)
+                results.append("<TABLE>")
+                        .append("<ID>").append(id).append("</ID>")
+                        .append("<DESCRIPTION>").append(description).append("</DESCRIPTION>")
+                        .append("<TEMPCONTROLLED>").append(temp).append("</TEMPCONTROLLED>")
+                        .append("</TABLE>")
+            }
+            return results.toString().replace("null", "").replace("NOM", "")
+
+        } else if (gvyClassParam.toUpperCase().equals("REFEQUIPMENTTYPEBYCLASS")) {
+
+            StringBuilder results = new StringBuilder()
+
+            DomainQuery dq = QueryFactory.createDomainQuery(ArgoRefEntity.EQUIP_TYPE)
+                    .addDqField(ArgoRefField.EQTYP_NOMINAL_LENGTH)
+                    .addDqField(ArgoRefField.EQTYP_ISO_GROUP)
+                    .addDqField(ArgoRefField.EQTYP_NOMINAL_HEIGHT)
+                    .addDqField(ArgoRefField.EQTYP_DESCRIPTION)
+                    .addDqField(ArgoRefField.EQTYP_ID)
+                    .setDqFieldsDistinct()
+                    .addDqPredicate(PredicateFactory.eq(ArgoRefField.EQTYP_CLASS, EquipClassEnum.getEnum(equipClassParam)))
+                    .addDqOrdering(Ordering.asc(ArgoRefField.EQTYP_ID))
+
+            QueryResult rs = HibernateApi.getInstance().findValuesByDomainQuery(dq)
+            List records = rs.getRetrievedResults()
+            for (int i = 0; i < records.size(); i++) {
+                EquipNominalLengthEnum nomLength = rs.getValue(i, 0)
+                EquipIsoGroupEnum isoGroup = rs.getValue(i, 1)
+                EquipNominalHeightEnum nomHeight = rs.getValue(i, 2)
+                String eqTypeDesc = rs.getValue(i, 3)
+                String isoId = rs.getValue(i, 4)
+
+                results.append("<TABLE>")
+                        .append("<ID>").append(isoId).append("</ID>")
+                        .append("<DESCRIPTION>").append(eqTypeDesc).append("</DESCRIPTION>")
+                        .append("</TABLE>")
+            }
+            return results.toString().replace("null", "").replace("NOM", "")
+
+        } else if (gvyClassParam.toUpperCase().equals("BOOKINGEQUIPMENT")) {
+
+            Booking booking = Booking.hydrate(gKeyParam)
+            StringBuilder results = new StringBuilder()
+
+            DomainQuery dq = QueryFactory.createDomainQuery(InventoryEntity.UNIT)
+                    .addDqPredicate(PredicateFactory.in(UnitField.UNIT_DEPARTURE_ORDER, booking.getEqboGkey()))
+                    .setDqFieldsDistinct()
+
+            Set<Unit> unitSet = HibernateApi.getInstance().findEntitiesByDomainQuery(dq)
+            if (unitSet.isEmpty()) {
+                return "Error:  No Units for Order Item"
+            }
+            for (Unit unit in unitSet) {
+                String itemType
+                UnitFacilityVisit ufv = unit.getUfvForFacilityNewest(facility)
+                UnitEquipment unitEquipment = unit.getUnitPrimaryUe()
+                Equipment equipment = unitEquipment.getUeEquipment()
+                EquipType equipType = equipment.getEqEquipType()
+                EquipGrade grade = unitEquipment.getUeGradeID()
+                String gradeId = (grade == null) ? "" : grade.getEqgrdId()
+                String damageFl = unit.isDamaged(equipment)
+                if (unit.isUnitPreadvised()) {
+                    itemType = "Preadvised"
+                } else if (unit.getUnitFreightKind() == FreightKindEnum.MTY
+                        && ufv.getUfvTransitState() in [UfvTransitStateEnum.S70_DEPARTED, UfvTransitStateEnum.S60_LOADED]) {
+                    itemType = "Empty Out"
+                } else if (unit.isReservedForBooking()) {
+                    itemType = "Reserved"
+                } else if (unit.getUnitFreightKind() == FreightKindEnum.FCL
+                        && ufv.getUfvTransitState().equals(UfvTransitStateEnum.S40_YARD)) {
+                    itemType = "Full In"
+                } else if (unit.getUnitFreightKind().equals(FreightKindEnum.FCL)
+                        && ufv.getUfvTransitState() != UfvTransitStateEnum.S40_YARD) {
+                    itemType = "Full Out"
+                }
+
+                results.append("<TABLE>")
+                        .append("<CLASS>").append(unit.getPrimaryEq().getEqClass().getKey()).append("</CLASS>")
+                        .append("<EQUIPMENTNBR>").append(unit.getUnitId()).append("</EQUIPMENTNBR>")
+                        .append("<EQSZ>").append(equipType.getEqtypNominalLength().getKey()).append("</EQSZ>")
+                        .append("<EQTP>").append(equipType.getEqtypIsoGroup().getKey()).append("</EQTP>")
+                        .append("<EQHT>").append(equipType.getEqtypNominalHeight().getKey()).append("</EQHT>")
+                        .append("<LOC_TYPE>").append(unit.getLocType().getKey()).append("</LOC_TYPE>")
+                        .append("<LOCATION>").append(ufv.getUfvLastKnownPosition()).append("</LOCATION>")
+                        .append("<POS_ID>").append(ufv.getUfvLastKnownPosition()).append("</POS_ID>")
+                        .append("<EQOGKEY>").append(booking.getEqboGkey()).append("</EQOGKEY>")
+                        .append("<GRADE_ID>").append(gradeId).append("</GRADE_ID>")
+                        .append("<STATUS>").append(unit.getUnitFreightKind().getKey()).append("</STATUS>")
+                        .append("<STATUSDETAILS>").append(unit.getUnitFreightKind().getKey()).append("</STATUSDETAILS>")
+                        .append("<CATEGORY>").append(unit.getUnitCategory().getKey()).append("</CATEGORY>")
+                        .append("<CATEGORYDETAILS>").append(unit.getUnitCategory().getKey()).append("</CATEGORYDETAILS>")
+                        .append("<DAMAGED>").append(damageFl).append("</DAMAGED>")
+                        .append("<DAMAGEFL>").append(damageFl).append("</DAMAGEFL>")
+                        .append("<HAZFL>").append(unit.getUnitIsHazard()).append("</HAZFL>")
+                        .append("<HOLDS>").append(unit.getUnitAppliedHoldOrPermName()).append("</HOLDS>")
+                        .append("<TYPE>").append(itemType).append("</TYPE>")
+                        .append("</TABLE>")
+            }
+            return results.toString().replace("NOM", "").replace("null", "")
+
+        } else if (gvyClassParam.toUpperCase().equals("BOOKINGHAZARDS")) {
+
+            Booking booking = Booking.hydrate(gKeyParam)
+            StringBuilder results = new StringBuilder()
+            if (!booking.isHazardous()) {
+                return "Error:  Booking Is Not Hazardous"
+            }
+            Hazards hazards = booking.getEqoHazards()
+            Set<HazardItem> hazardItemSet = hazards.getHzrdItems()
+            for (HazardItem hazardItem in hazardItemSet) {
+                results.append("<TABLE>")
+                        .append("<GKEY>").append(hazardItem.getHzrdiGkey()).append("</GKEY>")
+                        .append("<SEQ>").append(hazardItem.getHzrdiSeq()).append("</SEQ>")
+                        .append("<UNDG_NBR>").append(hazardItem.getHzrdiUNnum()).append("</UNDG_NBR>")
+                        .append("<LIMITEDQTYFL>").append(hazardItem.getHzrdiLtdQty()).append("</LIMITEDQTYFL>")
+                        .append("<IMDG_ID>").append(hazardItem.getHzrdiImdgCode().getKey()).append("</IMDG_ID>")
+                        .append("<DESCRIPTION>").append(hazardItem.getHzrdiImdgCode().getKey()).append(" - ").append(hazardItem.getDescription()).append("</DESCRIPTION>")
+                        .append("</TABLE>")
+
+            }
+            return results.toString().replace("null", "")
+
+        } else if (gvyClassParam.toUpperCase().equals("REFHAZARDCLASSES")) {
+
+            StringBuilder results = new StringBuilder()
+            String hazDescription
+            MessageTranslator hazMessageTranslator = ArgoUtils.getUserMessageTranslator()
+
+            List<ImdgClass> imdgClassSet = ImdgClass.getList()
+            for (ImdgClass imdgClass in imdgClassSet) {
+                hazDescription = hazMessageTranslator.getMessage(imdgClass.getDescriptionPropertyKey())
+                results.append("<TABLE>")
+                        .append("<ID>").append(imdgClass.getKey()).append("</ID>")
+                        .append("<DESCRIPTION>").append(imdgClass.getKey()).append(" - ").append(hazDescription).append("</DESCRIPTION>")
+                        .append("</TABLE>")
+            }
+            return results.toString().replace("null", "")
+
+        } else if (gvyClassParam.toUpperCase().equals("HAZDESCRIPTIONS")) {
+            StringBuilder results = new StringBuilder()
+
+            Sql sqlHazDesc = Sql.newInstance(url, user, password, driverClassName)
+            sqlHazDesc.eachRow("""
+                        select h.id,
+                               nvl(h.packinggroup,' ') || '-' || h.haz_class || ' - ' || h.description description
+                          from versiant_csp_hazdescriptions h
+                         where h.haz_class = ${hazClassParam}
+                           and h.unnumber = ${undgParam}
+                        """) {
+                results.append("<TABLE>")
+                        .append("<ID>").append(it.ID).append("</ID>")
+                        .append("<DESCRIPTION>").append(it.DESCRIPTION).append("</DESCRIPTION>")
+                        .append("</TABLE>")
+            }
+            return results.toString().replace("null", "")
+        } else if (gvyClassParam.toUpperCase().equals("HAZDESCRIPTIONSALL")) {
+            StringBuilder results = new StringBuilder()
+
+            Sql sqlHazDesc = Sql.newInstance(url, user, password, driverClassName)
+            sqlHazDesc.eachRow("""
+                            select * from (
+                                select h.id,
+                                       h.haz_class HazClass,
+                                       h.description,
+                                       h.unnumber,
+                                       h.packinggroup
+                                  from versiant_csp_hazdescriptions h
+                                 order by h.haz_class
+                                 )
+                        """) {
+                results.append("<TABLE>")
+                        .append("<ID>").append(it.ID).append("</ID>")
+                        .append("<HAZCLASS>").append(it.HAZCLASS).append("</HAZCLASS>")
+                        .append("<DESCRIPTION>").append(it.DESCRIPTION).append("</DESCRIPTION>")
+                        .append("<UNNUMBER>").append(it.UNNUMBER).append("</UNNUMBER>")
+                        .append("<PACKINGGROUP>").append(it.PACKINGGROUP).append("</PACKINGGROUP>")
+                        .append("</TABLE>")
+            }
+            return results.toString().replace("null", "")
+        } else if (gvyClassParam.toUpperCase().equals("HAZMGMTCONTAINERS")) {
+            StringBuilder results = new StringBuilder()
+            Date fromDate
+            Date toDate
+            SimpleDateFormat format = new SimpleDateFormat("yyyy-MM-dd HH:mm:SS", Locale.ENGLISH)
+            Calendar calendar = Calendar.getInstance()
+            if (fromDateParam == "") {
+                calendar.add(Calendar.YEAR, -20)
+                fromDate = calendar.getTime()
+            } else {
+                fromDate = format.parse(fromDateParam.trim())
+            }
+            if (toDateParam == "") {
+                calendar.add(Calendar.YEAR, +20)
+                toDate = calendar.getTime()
+            } else {
+                toDate = format.parse(toDateParam.trim())
+            }
+
+            java.sql.Timestamp sqlFromDate = new java.sql.Timestamp(fromDate.getTime())
+            java.sql.Timestamp sqlToDate = new java.sql.Timestamp(toDate.getTime())
+
+            if (verifyParam == "Y") {
+                verifyParam = "X"
+            }
+
+            if (eqNbrParam == "" && vesselParam == "" && voyageParam == "" && bookingNbrParam == ""
+                    && polParam == "" && podParam == "" && fromDateParam == "" && toDateParam == ""
+                    && verifyParam == "") {
+
+                String[] lineArr = lineParam.split(",")
+                for (String lineId : lineArr) {
+
+                    Sql sqlMgmtContainers = Sql.newInstance(url, user, password, driverClassName)
+                    sqlMgmtContainers.eachRow("""
+                        select u.gkey gkey,
+                               u.id EquipmentNbr,
+                               eo.nbr Booking,
+                               v.name VesselName,
+                               v.id Vessel,
+                               vvd.ob_vyg Voyage,
+                               pol.id PortofLoad,
+                               unl.place_name POLDescription,
+                               pod.id PortofDischarge,
+                               und.place_name PODDescription,
+                               sl.id ShippingLine,
+                               sl.name ShippingLineDetails,
+                               max(doc.created) DocCreated,
+                               max(doc.creator) DocCreator,
+                               max(doc.filenames) Files,
+                               max(doc.approved) approved,
+                               max(doc.approved_by) approved_by,
+                               max(doc.approved_time) approved_time,
+                               max(doc.id) id
+                          from inv_unit u
+                          join inv_unit_fcy_visit fcy on u.gkey=fcy.unit_gkey
+                          join inv_unit_equip ue on ue.unit_gkey=u.gkey
+                          join versiant_csp_hazardousdocs doc on doc.equse_gkey=u.gkey
+                          join inv_eq_base_order_item eoi on eoi.gkey=ue.depart_order_item_gkey
+                          join inv_eq_base_order eo on eo.gkey=eoi.eqo_gkey
+                          join argo_carrier_visit cv on cv.gkey = eo.vessel_visit_gkey
+                          join vsl_vessel_visit_details vvd on vvd.vvd_gkey=cv.cvcvd_gkey
+                          join vsl_vessels v on v.gkey=vvd.vessel_gkey
+                          join ref_routing_point pol on pol.gkey=eo.pol_gkey
+                          join ref_unloc_code unl on unl.gkey=pol.unloc_gkey
+                          join ref_routing_point pod on pod.gkey=eo.pod1_gkey
+                          join ref_unloc_code und on und.gkey=pod.unloc_gkey
+                          join ref_bizunit_scoped sl on sl.gkey=eo.line_gkey and sl.role='LINEOP' and sl.id=${lineId}
+                      group by u.gkey,
+                               u.id,
+                               eo.nbr,
+                               v.name,
+                               v.id,
+                               vvd.ob_vyg,
+                               pol.id,
+                               unl.place_name,
+                               pod.id,
+                               und.place_name,
+                               sl.id,
+                               sl.name
+                         order by 13
+
+                        """) {
+                        results.append("<TABLE>")
+                                .append("<GKEY>").append(it.GKEY).append("</GKEY>")
+                                .append("<EQUIPMENTNBR>").append(it.EQUIPMENTNBR).append("</EQUIPMENTNBR>")
+                                .append("<BOOKING>").append(it.BOOKING).append("</BOOKING>")
+                                .append("<VESSELNAME>").append(it.VESSELNAME).append("</VESSELNAME>")
+                                .append("<VESSEL>").append(it.VESSEL).append("</VESSEL>")
+                                .append("<VOYAGE>").append(it.VOYAGE).append("</VOYAGE>")
+                                .append("<PORTOFLOAD>").append(it.PORTOFLOAD).append("</PORTOFLOAD>")
+                                .append("<POLDESCRIPTION>").append(it.POLDESCRIPTION).append("</POLDESCRIPTION>")
+                                .append("<PORTOFDISCHARGE>").append(it.PORTOFDISCHARGE).append("</PORTOFDISCHARGE>")
+                                .append("<PODDESCRIPTION>").append(it.PODDESCRIPTION).append("</PODDESCRIPTION>")
+                                .append("<SHIPPINGLINE>").append(it.SHIPPINGLINE).append("</SHIPPINGLINE>")
+                                .append("<SHIPPINGLINEDETAILS>").append(it.SHIPPINGLINEDETAILS).append("</SHIPPINGLINEDETAILS>")
+                                .append("<DOCCREATED>").append(it.DOCCREATED).append("</DOCCREATED>")
+                                .append("<FILES>").append(it.FILES).append("</FILES>")
+                                .append("<APPROVED>").append(it.APPROVED).append("</APPROVED>")
+                                .append("<APPROVED_BY>").append(it.APPROVED_BY).append("</APPROVED_BY>")
+                                .append("<APPROVED_TIME>").append(it.APPROVED_TIME).append("</APPROVED_TIME>")
+                                .append("<ID>").append(it.ID).append("</ID>")
+                                .append("<UPLOADER>").append(it.DOCCREATOR).append("</UPLOADER>")
+                                .append("</TABLE>")
+                    }
+                }
+            } else {
+                String[] lineArr = lineParam.split(",")
+                for (String lineId : lineArr) {
+
+                    Sql sqlMgmtContainers = Sql.newInstance(url, user, password, driverClassName)
+                    sqlMgmtContainers.eachRow("""
+                        select u.gkey gkey,
+                               u.id EquipmentNbr,
+                               eo.nbr Booking,
+                               v.name VesselName,
+                               v.id Vessel,
+                               vvd.ob_vyg Voyage,
+                               pol.id PortofLoad,
+                               unl.place_name POLDescription,
+                               pod.id PortofDischarge,
+                               und.place_name PODDescription,
+                               sl.id ShippingLine,
+                               sl.name ShippingLineDetails,
+                               max(doc.created) DocCreated,
+                               max(doc.creator) DocCreator,
+                               max(doc.filenames) Files,
+                               max(doc.approved) approved,
+                               max(doc.approved_by) approved_by,
+                               max(doc.approved_time) approved_time,
+                               max(doc.id) id
+                          from inv_unit u
+                          join inv_unit_fcy_visit fcy on u.gkey=fcy.unit_gkey
+                          join inv_unit_equip ue on ue.unit_gkey=u.gkey
+                          join versiant_csp_hazardousdocs doc on doc.equse_gkey=u.gkey
+                          join inv_eq_base_order_item eoi on eoi.gkey=ue.depart_order_item_gkey
+                          join inv_eq_base_order eo on eo.gkey=eoi.eqo_gkey
+                          join argo_carrier_visit cv on cv.gkey = eo.vessel_visit_gkey
+                          join vsl_vessel_visit_details vvd on vvd.vvd_gkey=cv.cvcvd_gkey
+                          join vsl_vessels v on v.gkey=vvd.vessel_gkey
+                          join ref_routing_point pol on pol.gkey=eo.pol_gkey
+                          join ref_unloc_code unl on unl.gkey=pol.unloc_gkey
+                          join ref_routing_point pod on pod.gkey=eo.pod1_gkey
+                          join ref_unloc_code und on und.gkey=pod.unloc_gkey
+                          join ref_bizunit_scoped sl on sl.gkey=eo.line_gkey and sl.role='LINEOP' and sl.id=${lineId}
+                         where u.id = case when ${eqNbrParam} is null then u.id else ${eqNbrParam} end
+                           and eo.nbr = case when ${bookingNbrParam} is null then eo.nbr else ${bookingNbrParam} end
+                           and v.id = case when ${vesselParam} is null then v.id else ${vesselParam} end
+                           and vvd.ob_vyg = case when ${voyageParam} is null then vvd.ob_vyg else ${voyageParam} end
+                           and pod.id = case when ${podParam} is null then pod.id else ${podParam} end
+                           and pol.id = case when ${polParam} is null then pol.id else ${polParam} end
+                           and doc.created between ${sqlFromDate} and ${sqlToDate}
+                           and nvl(doc.approved,'N') = case when ${
+                        verifyParam
+                    } is null then nvl(doc.approved,'N') else ${
+                        verifyParam
+                    } end
+                      group by u.gkey,
+                               u.id,
+                               eo.nbr,
+                               v.name,
+                               v.id,
+                               vvd.ob_vyg,
+                               pol.id,
+                               unl.place_name,
+                               pod.id,
+                               und.place_name,
+                               sl.id,
+                               sl.name
+                         order by 13
+                        """) {
+                        results.append("<TABLE>")
+                                .append("<GKEY>").append(it.GKEY).append("</GKEY>")
+                                .append("<EQUIPMENTNBR>").append(it.EQUIPMENTNBR).append("</EQUIPMENTNBR>")
+                                .append("<BOOKING>").append(it.BOOKING).append("</BOOKING>")
+                                .append("<VESSELNAME>").append(it.VESSELNAME).append("</VESSELNAME>")
+                                .append("<VESSEL>").append(it.VESSEL).append("</VESSEL>")
+                                .append("<VOYAGE>").append(it.VOYAGE).append("</VOYAGE>")
+                                .append("<PORTOFLOAD>").append(it.PORTOFLOAD).append("</PORTOFLOAD>")
+                                .append("<POLDESCRIPTION>").append(it.POLDESCRIPTION).append("</POLDESCRIPTION>")
+                                .append("<PORTOFDISCHARGE>").append(it.PORTOFDISCHARGE).append("</PORTOFDISCHARGE>")
+                                .append("<PODDESCRIPTION>").append(it.PODDESCRIPTION).append("</PODDESCRIPTION>")
+                                .append("<SHIPPINGLINE>").append(it.SHIPPINGLINE).append("</SHIPPINGLINE>")
+                                .append("<SHIPPINGLINEDETAILS>").append(it.SHIPPINGLINEDETAILS).append("</SHIPPINGLINEDETAILS>")
+                                .append("<DOCCREATED>").append(it.DOCCREATED).append("</DOCCREATED>")
+                                .append("<FILES>").append(it.FILES).append("</FILES>")
+                                .append("<APPROVED>").append(it.APPROVED).append("</APPROVED>")
+                                .append("<APPROVED_BY>").append(it.APPROVED_BY).append("</APPROVED_BY>")
+                                .append("<APPROVED_TIME>").append(it.APPROVED_TIME).append("</APPROVED_TIME>")
+                                .append("<ID>").append(it.ID).append("</ID>")
+                                .append("<UPLOADER>").append(it.DOCCREATOR).append("</UPLOADER>")
+                                .append("</TABLE>")
+                    }
+                }
+            }
+            return results.toString().replace("null", "")
+        } else if (gvyClassParam.toUpperCase().equals("EQUIPMENTDETAILS")) {
+
+            StringBuilder results = new StringBuilder()
+            Equipment equipment = Equipment.findEquipment(eqNbrParam)
+            UnitFinder unitFinder = (UnitFinder) Roastery.getBean("unitFinder")
+            Unit unit = unitFinder.findActiveUnit(complex, equipment)
+            if (unit == null) {
+                unit = unitFinder.findDepartedUnit(complex, equipment)
+                if (unit == null) {
+                    return "Error:  Container is not Active"
+                }
+            }
+            String[] lineArr = lineParam.toUpperCase().split(",")
+            for (String line : lineArr) {
+                if (!unit.getUnitLineOperator().getBzuId().equalsIgnoreCase(line)) {
+                    continue
+                }
+                UnitFacilityVisit ufv = unit.getUnitActiveUfvNowActive()
+                Equipment eq = unit.getPrimaryEq()
+                UnitEquipment ue = unit.getUnitPrimaryUe()
+                CarrierVisit ibCv = ufv.getInboundCarrierVisit()
+                CarrierVisit obCv = unit.getOutboundCv()
+                UnitEquipment ueChassis = unit.getUnitCarriageUe()
+                String chassisNbr = (ueChassis == null) ? "" : ueChassis.getUeUnit().getUnitId()
+                String accessoryNbr = (unit.getUnitCtrAccessory() == null) ? "" : unit.getUnitCtrAccessory().getEqIdFull()
+                String truck = (unit.getUnitRtgTruckingCompany() == null) ? "" : unit.getUnitRtgTruckingCompany().getBzuName()
+                EqBaseOrder outBaseOrder = unit.getDepartureOrder()
+                String booking = (outBaseOrder == null) ? "" : outBaseOrder.getEqboNbr()
+                Routing routing = unit.getUnitRouting()
+                String pol = (routing == null || routing.getRtgPOL() == null) ? "" : routing.getRtgPOL().getPointId() + " - " + routing.getRtgPOL().getPointUnLoc().getUnlocPlaceName()
+                String polDesc = (routing == null || routing.getRtgPOL() == null) ? "" : routing.getRtgPOL().getPointUnLoc().getUnlocPlaceName()
+                String pod = (routing == null || routing.getRtgPOD1() == null) ? "" : routing.getRtgPOD1().getPointId() + " - " + routing.getRtgPOD1().getPointUnLoc().getUnlocPlaceName()
+                String podDesc = (routing == null || routing.getRtgPOD1() == null) ? "" : routing.getRtgPOD1().getPointUnLoc().getUnlocPlaceName()
+                String group = (routing == null || routing.getRtgGroup() == null) ? "" : routing.getRtgGroup().getGrpId()
+                String grade = (ue.getUeGradeID() == null) ? "" : ue.getUeGradeID().getEqgrdId()
+                String ventSetting = (unit.getLatestReeferRecord() == null) ? "" : unit.getLatestReeferRecord().getRfrecVentSetting().toString()
+                String ventUnit = (unit.getLatestReeferRecord() == null) ? "" : unit.getLatestReeferRecord().getRfrecVentUnit()
+                String destination = (unit.getUnitGoods() == null) ? "" : unit.getUnitGoods().getGdsDestination()
+                Hazards hazards = unit.getUnitGoods().getGdsHazards()
+                String hazClasses = ""
+                if (hazards != null) {
+                    List<HazardItem> hazItems = hazards.getHzrdItems()
+                    for (HazardItem hazItem : hazItems) {
+                        hazClasses = hazClasses + hazItem.getHzrdiImdgClass().getKey() + ","
+                    }
+                }
+                hazClasses = (hazClasses == "") ? "" : hazClasses.substring(0, hazClasses.length() - 1)
+
+                String sealNbr2
+                if (unit.getUnitSealNbr2() == null) {
+                    sealNbr2 = ""
+                } else {
+                    sealNbr2 = "," + unit.getUnitSealNbr2()
+                }
+                SpecialStow specialStow = unit.getUnitSpecialStow()
+                String stowId = (specialStow == null) ? "" : specialStow.getStwId()
+                EqDamageSeverityEnum dmgEnum = ue.getUeDamageSeverity()
+                String damaged = (dmgEnum == null) ? "" : dmgEnum.getKey()
+                String reefer = (ufv.getRfreqTempRequiredInF() == null) ? "" : ufv.getRfreqTempRequiredInF() + " F"
+
+                results.append("<TABLE>")
+                        .append("<CLASS>").append(unit.getPrimaryEq().getEqClass().getKey()).append("</CLASS>")
+                        .append("<EQUIPMENTNBR>").append(unit.getUnitId()).append("</EQUIPMENTNBR>")
+                        .append("<GKEY>").append(unit.getUnitGkey()).append("</GKEY>")
+                        .append("<LOC_TYPE>").append(ufv.getUfvLastKnownPosition()).append("</LOC_TYPE>")
+                        .append("<LOCATION>").append(ufv.getUfvLastKnownPosition().getPosLocId()).append("</LOCATION>")
+                        .append("<LOCATIONDETAILS>").append(ufv.getUfvLastKnownPosition().getPosLocId()).append("</LOCATIONDETAILS>")
+                        .append("<CATEGORY>").append(unit.getUnitCategory().getKey()).append("</CATEGORY>")
+                        .append("<CATEGORYDETAILS>").append(unit.getUnitCategory().getKey()).append("</CATEGORYDETAILS>")
+                        .append("<STATUS>").append(unit.getUnitFreightKind().getKey()).append("</STATUS>")
+                        .append("<STATUSDETAILS>").append(unit.getUnitFreightKind().getKey()).append("</STATUSDETAILS>")
+                        .append("<IBCARRIER>").append(ibCv.getLocId()).append("-").append(ibCv.getCvVisitNbr()).append(" ").append(ibCv.getCarrierVehicleName()).append("</IBCARRIER>")
+                        .append("<OBCARRIER>").append(obCv.getLocId()).append("-").append(obCv.getCvVisitNbr()).append(" ").append(obCv.getCarrierVehicleName()).append("</OBCARRIER>")
+                        .append("<SHIPPINGLINE>").append(unit.getUnitLineOperator().getBzuId()).append("</SHIPPINGLINE>")
+                        .append("<SHIPPINGLINEDETAILS>").append(unit.getUnitLineOperator().getBzuName()).append("</SHIPPINGLINEDETAILS>")
+                        .append("<REEFER>").append(reefer).append("</REEFER>")
+                        .append("<HAZARDOUS>").append(hazClasses).append("</HAZARDOUS>")
+                        .append("<CHASSIS>").append(chassisNbr).append("</CHASSIS>")
+                        .append("<GENSET>").append(accessoryNbr).append("</GENSET>")
+                        .append("<TRUCK>").append(truck).append("</TRUCK>")
+                        .append("<ACCESSORY>").append(accessoryNbr).append("</ACCESSORY>")
+                        .append("<BILLOFLADING>").append(unit.getUnitGoods().getGdsBlNbr()).append("</BILLOFLADING>")
+                        .append("<BOOKING>").append(booking).append("</BOOKING>")
+                        .append("<EQSZ>").append(eq.getEqEquipType().getEqtypNominalLength().getKey()).append("</EQSZ>")
+                        .append("<EQTP>").append(eq.getEqEquipType().getEqtypIsoGroup().getKey()).append("</EQTP>")
+                        .append("<EQHT>").append(eq.getEqEquipType().getEqtypNominalHeight().getKey()).append("</EQHT>")
+                        .append("<ISO>").append(eq.getEqEquipType().getEqtypId()).append("</ISO>")
+                        .append("<GROSSWEIGHT>").append(unit.getUnitGoodsAndCtrWtKg().round(2)).append(" KG").append("</GROSSWEIGHT>")
+                        .append("<SAFEWEIGHT>").append(eq.getEqSafeWeightKg().round(2)).append(" KG").append("</SAFEWEIGHT>")
+                        .append("<TAREWEIGHT>").append(eq.getEqTareWeightKg().round(2)).append(" KG").append("</TAREWEIGHT>")
+                        .append("<SEALNBR>").append(unit.getUnitSealNbr1()).append(sealNbr2).append("</SEALNBR>")
+                        .append("<PORTOFLOAD>").append(pol).append("</PORTOFLOAD>")
+                        .append("<POLDESCRIPTION>").append(polDesc).append("</POLDESCRIPTION>")
+                        .append("<PORTOFDISCHARGE>").append(pod).append("</PORTOFDISCHARGE>")
+                        .append("<PODDESCRIPTION>").append(podDesc).append("</PODDESCRIPTION>")
+                        .append("<DESTINATION>").append(destination).append("</DESTINATION>")
+                        .append("<DAMAGED>").append(damaged).append("</DAMAGED>")
+                        .append("<EQUIPMENTGROUP>").append(group).append("</EQUIPMENTGROUP>")
+                        .append("<OWNER>").append(eq.getEquipmentOwner().getBzuId()).append("</OWNER>")
+                        .append("<OWNERDESCRIPTION>").append(eq.getEquipmentOwner().getBzuName()).append("</OWNERDESCRIPTION>")
+                        .append("<GRADE>").append(grade).append("</GRADE>")
+                        .append("<REMARKS>").append(unit.getUnitRemark()).append("</REMARKS>")
+                        .append("<OOG>").append(unit.getUnitIsOog()).append("</OOG>")
+                        .append("<SHANDID>").append(stowId).append("</SHANDID>")
+                        .append("<TEMPREQUIRED>").append(reefer).append("</TEMPREQUIRED>")
+                        .append("<TEMPUNITS>").append("</TEMPUNITS>")
+                        .append("<VENTREQUIRED>").append(ventSetting).append("</VENTREQUIRED>")
+                        .append("<VENTUNITS>").append(ventUnit).append("</VENTUNITS>")
+                        .append("</TABLE>")
+            }
+            return results.toString().replace("null", "").replace("NOM", "")
+        } else if (gvyClassParam.toUpperCase().equals("EQUIPMENTHOLDS")) {
+
+            Equipment equipment = Equipment.findEquipment(eqNbrParam)
+            UnitFinder unitFinder = (UnitFinder) Roastery.getBean("unitFinder")
+            Unit unit = unitFinder.findActiveUnit(complex, equipment)
+            GoodsBase goodsBase = unit.getUnitGoods()
+            GoodsBl goodsBl = GoodsBl.resolveGoodsBlFromGoodsBase(goodsBase)
+
+            if (unit == null) {
+                return "Error:  Container is not Active"
+            }
+            StringBuilder results = new StringBuilder()
+            String releasedFl
+            String releaseBy
+            Date releaseDate
+            String heldBy
+            Date holdDate
+            String[] lineArr = lineParam.toUpperCase().split(",")
+            for (String line : lineArr) {
+                if (!unit.getUnitLineOperator().getBzuId().equalsIgnoreCase(line)) {
+                    continue
+                }
+                ServicesManager unitServiceManager = (ServicesManager) Roastery.getBean(ServicesManager.BEAN_ID)
+                if (unitServiceManager.getImpedimentsForEntity(unit) != null) {
+                    Set<ServiceImpediment> unitImpedSet = unitServiceManager.getImpedimentsForEntity(unit)
+                    TreeSet<ServiceImpediment> treeSet = new TreeSet<ServiceImpediment>(new GkeyComparator())
+                    treeSet.addAll(unitImpedSet)
+                    for (ServiceImpediment unitServImped : treeSet) {
+                        if (unitServImped.getStatus().equals(FlagStatusEnum.GRANTED)
+                                || unitServImped.getStatus().equals(FlagStatusEnum.RELEASED)
+                                || unitServImped.getStatus().equals(FlagStatusEnum.CANCELED)) {
+                            releasedFl = "1"
+                        } else {
+                            releasedFl = "0"
+                        }
+
+                        if (!unitServImped.getVetoes().isEmpty() && releasedFl.equals("1")) {
+                            Set<Veto> unitVetoes = unitServImped.getVetoes()
+                            for (Veto unitVeto in unitVetoes) {
+                                releaseBy = unitVeto.getVetoedBy()
+                                releaseDate = unitVeto.getVetoAppliedDate()
+                            }
+                        }
+
+                        Serializable flagGkey = (unitServImped.getFlagGkey() == null) ? 0 : unitServImped.getFlagGkey()
+
+                        if (unitServImped.getFlagType().getPurpose().equals(FlagPurposeEnum.PERMISSION)) {
+                            releaseBy = unitServImped.getAppliedBy()
+                            releaseDate = unitServImped.getApplyDate()
+                            heldBy = null
+                            holdDate = null
+                        } else {
+                            heldBy = unitServImped.getAppliedBy()
+                            holdDate = unitServImped.getApplyDate()
+                        }
+                        results.append("<TABLE>")
+                                .append("<GKEY>").append(flagGkey).append("</GKEY>")
+                                .append("<ROLE>").append(unitServImped.getFlagType().getPurpose().getKey()).append("</ROLE>")
+                                .append("<HOLDCLASS>").append(unitServImped.getHpvId()).append("</HOLDCLASS>")
+                                .append("<HOLDDESCRIPTION>").append(unitServImped.getFlagType().getDescription()).append("</HOLDDESCRIPTION>")
+                                .append("<HOLDTYPE>").append(unitServImped.getFlagType().getId()).append("</HOLDTYPE>")
+                                .append("<HELDBY>").append(heldBy).append("</HELDBY>")
+                                .append("<HOLDDATE>").append(holdDate).append("</HOLDDATE>")
+                                .append("<HOLDREFERENCE>").append(unitServImped.getReferenceId()).append("</HOLDREFERENCE>")
+                                .append("<HOLDNOTES>").append(unitServImped.getNote()).append("</HOLDNOTES>")
+                                .append("<RELEASEDFL>").append(releasedFl).append("</RELEASEDFL>")
+                                .append("<RELEASEBY>").append(releaseBy).append("</RELEASEBY>")
+                                .append("<RELEASEDATE>").append(releaseDate).append("</RELEASEDATE>")
+                                .append("<APPLTOENTY>").append(unitServImped.getAppliedToClass().getKey().replace("BL", "BILL OF LADING")).append("</APPLTOENTY>")
+                                .append("</TABLE>")
+                    }
+                }
+
+                if (!goodsBl == null) {
+                    Set<BillOfLading> billOfLadingSet = goodsBl.getGdsblBillsOfLading()
+
+                    for (BillOfLading bl : billOfLadingSet) {
+                        ServicesManager serviceManager = (ServicesManager) Roastery.getBean(ServicesManager.BEAN_ID)
+                        if (serviceManager.getImpedimentsForEntity(bl) != null) {
+                            Set<ServiceImpediment> impedSet = serviceManager.getImpedimentsForEntity(bl)
+                            TreeSet<ServiceImpediment> treeSet = new TreeSet<ServiceImpediment>(new GkeyComparator())
+                            treeSet.addAll(impedSet)
+                            for (ServiceImpediment servImped : treeSet) {
+                                if (servImped.getStatus().equals(FlagStatusEnum.GRANTED)
+                                        || servImped.getStatus().equals(FlagStatusEnum.RELEASED)
+                                        || servImped.getStatus().equals(FlagStatusEnum.CANCELED)) {
+                                    releasedFl = "1"
+                                } else {
+                                    releasedFl = "0"
+                                }
+
+                                if (!servImped.getVetoes().isEmpty() && releasedFl.equals("1")) {
+                                    Set<Veto> vetoes = servImped.getVetoes()
+                                    for (Veto veto in vetoes) {
+                                        releaseBy = veto.getVetoedBy()
+                                        releaseDate = veto.getVetoAppliedDate()
+                                    }
+                                }
+
+                                Serializable flagGkey = (unitServImped.getFlagGkey() == null) ? 0 : unitServImped.getFlagGkey()
+
+                                if (servImped.getFlagType().getPurpose().equals(FlagPurposeEnum.PERMISSION)) {
+                                    releaseBy = servImped.getAppliedBy()
+                                    releaseDate = servImped.getApplyDate()
+                                    heldBy = null
+                                    holdDate = null
+                                } else {
+                                    heldBy = servImped.getAppliedBy()
+                                    holdDate = servImped.getApplyDate()
+                                }
+                                results.append("<TABLE>")
+                                        .append("<GKEY>").append(flagGkey).append("</GKEY>")
+                                        .append("<ROLE>").append(servImped.getFlagType().getPurpose().getKey()).append("</ROLE>")
+                                        .append("<HOLDCLASS>").append(servImped.getHpvId()).append("</HOLDCLASS>")
+                                        .append("<HOLDDESCRIPTION>").append(servImped.getFlagType().getDescription()).append("</HOLDDESCRIPTION>")
+                                        .append("<HOLDTYPE>").append(servImped.getFlagType().getId()).append("</HOLDTYPE>")
+                                        .append("<HELDBY>").append(heldBy).append("</HELDBY>")
+                                        .append("<HOLDDATE>").append(holdDate).append("</HOLDDATE>")
+                                        .append("<HOLDREFERENCE>").append(servImped.getReferenceId()).append("</HOLDREFERENCE>")
+                                        .append("<HOLDNOTES>").append(servImped.getNote()).append("</HOLDNOTES>")
+                                        .append("<RELEASEDFL>").append(releasedFl).append("</RELEASEDFL>")
+                                        .append("<RELEASEBY>").append(releaseBy).append("</RELEASEBY>")
+                                        .append("<RELEASEDATE>").append(releaseDate).append("</RELEASEDATE>")
+                                        .append("<APPLTOENTY>").append(servImped.getAppliedToClass().getKey().replace("BL", "BILL OF LADING")).append("</APPLTOENTY>")
+                                        .append("</TABLE>")
+                            }
+                        }
+                    }
+                }
+            }
+            return results.toString().replace("null", "")
+        } else if (gvyClassParam.toUpperCase().equals("EQUIPMENTHISTORY")) {
+
+            StringBuilder results = new StringBuilder()
+            Equipment equipment = Equipment.findEquipment(eqNbrParam)
+            UnitFinder unitFinder = (UnitFinder) Roastery.getBean("unitFinder")
+            Unit unit = unitFinder.findActiveUnit(complex, equipment)
+            if (unit == null) {
+                return "Error:  Container is not Active"
+            }
+            String[] lineArr = lineParam.toUpperCase().split(",")
+            for (String line : lineArr) {
+                if (!unit.getUnitLineOperator().getBzuId().equalsIgnoreCase(line)) {
+                    continue
+                }
+
+                DomainQuery dqSrv = QueryFactory.createDomainQuery(ServicesEntity.EVENT)
+                        .addDqPredicate(PredicateFactory.eq(ServicesField.EVNT_APPLIED_TO_PRIMARY_KEY, unit.getUnitGkey()))
+
+                List<Event> eventList = HibernateApi.getInstance().findEntitiesByDomainQuery(dqSrv)
+                if (eventList.isEmpty()) {
+                    return "Error:  No Unit History"
+                }
+                for (Event event in eventList) {
+                    results.append("<TABLE>")
+                            .append("<GKEY>").append(event.getEvntGkey()).append("</GKEY>")
+                            .append("<EQUIPMENTNBR>").append(event.getEvntAppliedToNaturalKey()).append("</EQUIPMENTNBR>")
+                            .append("<EVENT>").append(event.getEvntEventType().getId()).append("</EVENT>")
+                            .append("<EQUSE_GKEY>").append(event.getEvntAppliedToPrimaryKey()).append("</EQUSE_GKEY>")
+                            .append("<SHIPPINGLINE>").append(event.getEventOperatorId()).append("</SHIPPINGLINE>")
+                            .append("<SHIPPINGLINEDETAILS>").append(event.getEvntOperator().getOprName()).append("</SHIPPINGLINEDETAILS>")
+                            .append("<PERFORMED>").append(event.getEventTime()).append("</PERFORMED>")
+                            .append("<PERFORMER>").append(event.getEvntAppliedBy()).append("</PERFORMER>")
+                            .append("<NOTES>").append(event.getEventNote()).append("</NOTES>")
+                            .append("<CREATED>").append(event.getEventCreated()).append("</CREATED>")
+                            .append("<TRUCKINGCOMPANYSCAC>").append(event.getEvntOperator().getOprId()).append("</TRUCKINGCOMPANYSCAC>")
+                            .append("<DETAIL>").append(event.getEvntFieldChangesString()).append("</DETAIL>")
+                            .append("</TABLE>")
+                }
+            }
+            return results.toString().replace("null", "")
+        } else if (gvyClassParam.toUpperCase().equals("GATETRANSACTIONLIST")) {
+            StringBuilder results = new StringBuilder()
+
+            DateFormat formatter
+            Date fromDate
+            Date toDate
+            formatter = new SimpleDateFormat("dd-MMM-yy")
+
+            DomainQuery dq = QueryFactory.createDomainQuery(RoadEntity.TRUCK_TRANSACTION)
+                    .setDqMaxResults(10)
+                    .addDqOrdering(Ordering.desc(RoadField.TRAN_CREATED))
+
+            if (eqNbrParam != "") {
+                dq.addDqPredicate(PredicateFactory.eq(RoadField.TRAN_CTR_NBR, eqNbrParam))
+            }
+
+            if (tranNbrParam != "") {
+                dq.addDqPredicate(PredicateFactory.eq(RoadField.TRAN_NBR, tranNbrParam))
+            }
+
+            if (truckIdParam != "") {
+                dq.addDqPredicate(PredicateFactory.eq(RoadField.TRAN_CHS_LICENSE_NBR, truckIdParam))
+            }
+
+            if (tranTypeParam != "") {
+                TranSubTypeEnum tranType = TranSubTypeEnum.getEnum(tranTypeParam)
+                dq.addDqPredicate(PredicateFactory.eq(RoadField.TRAN_SUB_TYPE, tranType))
+            }
+
+            if (bookingNbrParam != "") {
+                dq.addDqPredicate(PredicateFactory.eq(RoadField.TRAN_EQO_NBR, bookingNbrParam))
+            }
+
+            if (truckingCoParam != "") {
+                dq.addDqPredicate(PredicateFactory.eq(RoadField.TRAN_TRKC_ID, truckingCoParam))
+            }
+
+            if (shippingLineParam != "") {
+                dq.addDqPredicate(PredicateFactory.eq(RoadField.TRAN_LINE_ID, shippingLineParam))
+            }
+
+            if (tranStatusParam != "") {
+                TranStatusEnum tranStatus = TranStatusEnum.getEnum(tranStatusParam)
+                dq.addDqPredicate(PredicateFactory.eq(RoadField.TRAN_STATUS, tranStatus))
+            }
+
+            if (fromDateParam != "") {
+                fromDate = (Date) formatter.parse(fromDateParam)
+                toDate = (Date) formatter.parse(fromDateParam)
+                Calendar calendar = Calendar.getInstance()
+                calendar.setTime(toDate)
+                calendar.add(Calendar.DATE, 1)
+                toDate = calendar.getTime()
+                dq.addDqPredicate(PredicateFactory.between(RoadField.TRAN_CREATED, fromDate, toDate))
+            }
+            List<TruckTransaction> transList = HibernateApi.getInstance().findEntitiesByDomainQuery(dq)
+            for (TruckTransaction tran in transList) {
+
+                String[] lineArr = lineParam.toUpperCase().split(",")
+                for (String line : lineArr) {
+                    if (!tran.getTranLine().getBzuId().equalsIgnoreCase(line)) {
+                        continue
+                    }
+
+                    Set<Document> documents = tran.getTranDocuments()
+                    for (Document doc in documents) {
+                        results.append("<TABLE>")
+                                .append("<TRANGKEY>").append(tran.getTranGkey()).append("</TRANGKEY>")
+                                .append("<TRANSNBR>").append(tran.getTranNbr()).append("</TRANSNBR>")
+                                .append("<DATETIME>").append(tran.getTranCreated()).append("</DATETIME>")
+                                .append("<TRANTYPE>").append(tran.getTranSubType().getKey()).append("</TRANTYPE>")
+                                .append("<TRANTYPEDESC>").append(tran.getTranSubType().getKey()).append("</TRANTYPEDESC>")
+                                .append("<STATUS>").append(tran.getTranStatus().getKey()).append("</STATUS>")
+                                .append("<TRUCKID>").append(tran.getTranTruckingCompany().getBzuId()).append("</TRUCKID>")
+                                .append("<TRUCKINGCOMPANY>").append(tran.getTranTruckingCompany().getBzuName()).append("</TRUCKINGCOMPANY>")
+                                .append("<SHIPPINGLINE>").append(tran.getTranLineId()).append("</SHIPPINGLINE>")
+                                .append("<CONTAINER>").append(tran.getTranCtrNbr()).append("</CONTAINER>")
+                                .append("<BOOKING>").append(tran.getTranEqoNbr()).append("</BOOKING>")
+                                .append("<DOCUMENTSEQ>").append(doc.getDocPk()).append("</DOCUMENTSEQ>")
+                                .append("<DOCUMENTCLASS>").append(doc.getDocDocType().getDoctypeId()).append("</DOCUMENTCLASS>")
+                                .append("<DOCUMENTCREATED>").append(doc.getDocCreated()).append("</DOCUMENTCREATED>")
+                                .append("<DOCUMENTCREATOR>").append(doc.getDocCreator()).append("</DOCUMENTCREATOR>")
+                                .append("</TABLE>")
+                    }
+                }
+            }
+            return results.toString().replace("null", "")
+        } else if (gvyClassParam.toUpperCase().equals("GATEDOCUMENTDETAILS")) {
+            StringBuilder results = new StringBuilder()
+
+            TruckTransaction tran = TruckTransaction.loadByGkey(tranGkeyParam)
+            Map missions = new HashMap()
+            missions.put("RE", "LOAD IN")
+            missions.put("RI", "LOAD IN")
+            missions.put("RM", "EMPTY IN")
+            missions.put("RC", "CHASSIS IN")
+            missions.put("DI", "LOAD OUT")
+            missions.put("DE", "LOAD OUT")
+            missions.put("DM", "EMPTY OUT")
+            missions.put("DC", "CHASSIS OUT")
+
+            EquipType ctrType = tran.getCtrType()
+            String ctrSz = (ctrType == null) ? "" : ctrType.getEqtypNominalLength().getKey()
+            String ctrTp = (ctrType == null) ? "" : ctrType.getEqtypIsoGroup().getKey()
+            String ctrHt = (ctrType == null) ? "" : ctrType.getEqtypNominalHeight().getKey()
+            EquipType chsType = tran.getChsType()
+            String chsSz = (chsType == null) ? "" : chsType.getEqtypNominalLength().getKey()
+            String chsTp = (chsType == null) ? "" : chsType.getEqtypIsoGroup().getKey()
+            String chsHt = (chsType == null) ? "" : chsType.getEqtypNominalHeight().getKey()
+            CarrierVisit cv = tran.getCarrierVisit()
+            String shipId = (cv == null) ? "" : cv.getCarrierVehicleId()
+            String shipName = (cv == null) ? "" : cv.getCarrierVehicleName()
+            String voyNbr = (cv == null) ? "" : cv.getCarrierObVoyNbrOrTrainId()
+            String callNbr = (cv == null) ? "" : cv.getCarrierObVisitCallNbr()
+            String seals = tran.getTranSealNbr1()
+            if (tran.getTranSealNbr2() != null) {
+                seals = seals + "," + tran.getTranSealNbr2()
+            }
+
+            DomainQuery dq1 = QueryFactory.createDomainQuery(RoadEntity.DOCUMENT)
+                    .addDqPredicate(PredicateFactory.eq(RoadField.DOC_TRANSACTION, tran.getTranGkey()))
+                    .addDqPredicate(PredicateFactory.eq(RoadField.DOC_PK, docGkeyParam))
+
+            List<Document> documents = HibernateApi.getInstance().findEntitiesByDomainQuery(dq1)
+
+            for (Document doc in documents) {
+                String docMsgText = ""
+                Set<DocumentMessage> docMsgs = doc.getDocMessages()
+                for (DocumentMessage docMsg in docMsgs) {
+                    docMsgText = docMsgText + docMsg.getDocmsgMsgText() + ";"
+                }
+                results.append("<TABLE>")
+                        .append("<TRANGKEY>").append(tran.getTranGkey()).append("</TRANGKEY>")
+                        .append("<DOCTEXT>").append(docMsgText).append("</DOCTEXT>")
+                        .append("<DOCCLASS>").append(doc.getDocDocType().getDoctypeId()).append("</DOCCLASS>")
+                        .append("<TRANNBR>").append(tran.getTranNbr()).append("</TRANNBR>")
+                        .append("<GROSSWT>").append(tran.getTranCtrGrossWeight()).append("</GROSSWT>")
+                        .append("<TERMINALNAME>").append(facility.getFcyName()).append("</TERMINALNAME>")
+                        .append("<TRANSTATUS>").append(tran.getTranStatus().getKey()).append("</TRANSTATUS>")
+                        .append("<SHIPPINGLINEDETAILS>").append(tran.getTranLine().getBzuId()).append(":").append(tran.getTranLine().getBzuName()).append("</SHIPPINGLINEDETAILS>")
+                        .append("<TRANMISSION>").append(tran.getTranSubType().getKey()).append("</TRANMISSION>")
+                        .append("<TRANMISSONDETAILS>").append(missions.get(tran.getTranSubType().getKey())).append("</TRANMISSONDETAILS>")
+                        .append("<TRANTRUCKCO>").append(tran.getTranTruckingCompany().getBzuId()).append("</TRANTRUCKCO>")
+                        .append("<TRUCKINGCOMPANYNAME>").append(tran.getTranTruckingCompany().getBzuId()).append(tran.getTranTruckingCompany().getBzuName()).append("</TRUCKINGCOMPANYNAME>")
+                        .append("<DRIVERNAME>").append(tran.getTranTruckVisit().getTvdtlsDriverName()).append("</DRIVERNAME>")
+                        .append("<DRIVERLICENSE>").append(tran.getTranTruckVisit().getTvdtlsDriverLicenseNbr()).append("</DRIVERLICENSE>")
+                        .append("<TRUCKLICENSENBR>").append(tran.getTranTruckVisit().getTruckLicenseNbr()).append("</TRUCKLICENSENBR>")
+                        .append("<CREATED>").append(tran.getTranCreated()).append("</CREATED>")
+                        .append("<CREATOR>").append(tran.getTranCreator()).append("</CREATOR>")
+                        .append("<CTRNBR>").append(tran.getTranCtrNbr()).append("</CTRNBR>")
+                        .append("<CTR_EQSZ_ID>").append(ctrSz).append("</CTR_EQSZ_ID>")
+                        .append("<CTR_EQTP_ID>").append(ctrTp).append("</CTR_EQTP_ID>")
+                        .append("<CTR_EQHT_ID>").append(ctrHt).append("</CTR_EQHT_ID>")
+                        .append("<CHS_NBR>").append(tran.getTranChsNbr()).append("</CHS_NBR>")
+                        .append("<CHS_EQSZ_ID>").append(chsSz).append("</CHS_EQSZ_ID>")
+                        .append("<CHS_EQTP_ID>").append(chsTp).append("</CHS_EQTP_ID>")
+                        .append("<CHS_EQHT_ID>").append(chsHt).append("</CHS_EQHT_ID>")
+                        .append("<SHIP_ID>").append(shipId).append("</SHIP_ID>")
+                        .append("<SHIP_NAME>").append(shipName).append("</SHIP_NAME>")
+                        .append("<VOY_NBR>").append(voyNbr).append("</VOY_NBR>")
+                        .append("<CALL_NBR>").append(callNbr).append("</CALL_NBR>")
+                        .append("<SCALEWT>").append(tran.getTranScaleWeight()).append("</SCALEWT>")
+                        .append("<CARGOWT>").append(tran.getTranCtrNetWeight()).append("</CARGOWT>")
+                        .append("<CTR_TARE_WT>").append(tran.getTranCtrTareWeight()).append("</CTR_TARE_WT>")
+                        .append("<CHS_TARE_WT>").append(tran.getTranChsTareWeight()).append("</CHS_TARE_WT>")
+                        .append("<BOOKING>").append(tran.getTranEqoNbr()).append("</BOOKING>")
+                        .append("<TEMP>").append(tran.getTranChsAccNbr()).append("</TEMP>")
+                        .append("<SEALS>").append(seals).append("</SEALS>")
+                        .append("<GENSET>").append(tran.getTranCtrAccNbr()).append("</GENSET>")
+                        .append("<FUEL>").append(tran.getTranCtrAccFuelLevel()).append("</FUEL>")
+                        .append("<VENT>").append(tran.getTranVentRequired()).append("</VENT>")
+                        .append("<RELEASENBR>").append(tran.getTranEqoNbr()).append("</RELEASENBR>")
+                        .append("<PORT_ID>").append("</PORT_ID>")
+                        .append("<EIRDATE>").append(doc.getDocCreator()).append("</EIRDATE>")
+                        .append("</TABLE>")
+            }
+            return results.toString().replace("null", "")
+
+        } else if (gvyClassParam.toUpperCase().equals("EQUIPMENTGRADES")) {
+            StringBuilder results = new StringBuilder()
+            DomainQuery dq = QueryFactory.createDomainQuery(ArgoRefEntity.EQUIP_GRADE)
+                    .setDqFieldsDistinct()
+            Set<EquipGrade> equipGradeSet = HibernateApi.getInstance().findEntitiesByDomainQuery(dq)
+            for (EquipGrade equipGrade in equipGradeSet) {
+                results.append("<TABLE>")
+                        .append("<SORTORDER>").append("2").append("</SORTORDER>")
+                        .append("<ID>").append(equipGrade.getEqgrdId()).append("</ID>")
+                        .append("<DESCRIPTION>").append(equipGrade.getEqgrdDescription()).append("</DESCRIPTION>")
+                        .append("</TABLE>")
+            }
+            return results.toString().replace("null", "")
+        } else if (gvyClassParam.toUpperCase().equals("ORDERPURPOSE")) {
+            StringBuilder results = new StringBuilder()
+            DomainQuery dq = QueryFactory.createDomainQuery(ArgoRefEntity.ORDER_PURPOSE)
+                    .setDqFieldsDistinct()
+            Set<OrderPurpose> orderPurposeSet = HibernateApi.getInstance().findEntitiesByDomainQuery(dq)
+            for (OrderPurpose orderPurpose in orderPurposeSet) {
+                results.append("<TABLE>")
+                        .append("<ID>").append(orderPurpose.getId()).append("</ID>")
+                        .append("</TABLE>")
+            }
+            return results.toString().replace("null", "")
+        } else if (gvyClassParam.toUpperCase().equals("POOLPARTNER")) {
+            StringBuilder results = new StringBuilder()
+            DomainQuery dq = QueryFactory.createDomainQuery(PoolsEntity.POOL)
+            Set<Pool> poolSet = HibernateApi.getInstance().findEntitiesByDomainQuery(dq)
+            for (Pool pool in poolSet) {
+                results.append("<TABLE>")
+                        .append("<ID>").append(pool.getPoolId()).append("</ID>")
+                        .append("</TABLE>")
+            }
+            return results.toString().replace("null", "")
+        } else if (gvyClassParam.toUpperCase().equals("TEMPSETTINGS")) {
+            StringBuilder results = new StringBuilder()
+            Set<TempUnitEnum> temps = TempUnitEnum.getEnumList()
+            for (TempUnitEnum tempEnum in temps) {
+                String[] tempDescRes = tempEnum.getDescriptionResKey().split("\\.")
+                String tempDesc = tempDescRes[2]
+                results.append("<TABLE>")
+                        .append("<ID>").append(tempEnum.getKey()).append("</ID>")
+                        .append("<DESCRIPTION>").append(tempEnum.getKey()).append(" - ").append(tempDesc).append("</DESCRIPTION>")
+                        .append("</TABLE>")
+            }
+            return results
+        } else if (gvyClassParam.toUpperCase().equals("ISOCODES")) {
+            StringBuilder results = new StringBuilder()
+
+            DomainQuery dq = QueryFactory.createDomainQuery(ArgoRefEntity.EQUIP_TYPE)
+                    .addDqField(ArgoRefField.EQTYP_ID)
+                    .addDqField(ArgoRefField.EQTYP_DESCRIPTION)
+                    .addDqField(ArgoRefField.EQTYP_NOMINAL_LENGTH)
+                    .addDqField(ArgoRefField.EQTYP_ISO_GROUP)
+                    .addDqField(ArgoRefField.EQTYP_NOMINAL_HEIGHT)
+                    .addDqField(ArgoRefField.EQTYP_SAFE_WEIGHT_KG)
+                    .addDqField(ArgoRefField.EQTYP_TARE_WEIGHT_KG)
+
+            QueryResult rs = HibernateApi.getInstance().findValuesByDomainQuery(dq)
+            List records = rs.getRetrievedResults()
+            for (int i = 0; i < records.size(); i++) {
+                String eqTypeId = rs.getValue(i, 0)
+                String eqTypeDescription = rs.getValue(i, 1)
+                EquipNominalLengthEnum nomLength = rs.getValue(i, 2)
+                EquipIsoGroupEnum isoGroup = rs.getValue(i, 3)
+                EquipNominalHeightEnum nomHeight = rs.getValue(i, 4)
+                String safeWeight = rs.getValue(i, 5)
+                String tareWeight = rs.getValue(i, 6)
+                results.append("<TABLE>").append("<ID>").append(eqTypeId).append("</ID>")
+                        .append("<DESCRIPTION>").append(eqTypeDescription).append("</DESCRIPTION>")
+                        .append("<EQSZ>").append(nomLength.getKey()).append("</EQSZ>")
+                        .append("<EQTP>").append(isoGroup.getKey()).append("</EQTP>")
+                        .append("<EQHT>").append(nomHeight.getKey()).append("</EQHT>")
+                        .append("<SAFEWEIGHT>").append(safeWeight).append(" KG").append("</SAFEWEIGHT>")
+                        .append("<TAREWEIGHT>").append(tareWeight).append(" KG").append("</TAREWEIGHT>").append("</TABLE>")
+            }
+            return results.toString().replace("null", "").replace("NOM", "")
+        } else if (gvyClassParam.toUpperCase().equals("HAZDOWNLOADBYCONTAINER")) {
+            StringBuilder results = new StringBuilder()
+            results.append("<TABLE>")
+                    .append("<CONTAINER>CONTAINER</CONTAINER>")
+                    .append("<SHIPPING_LINE>SHIPPING LINE</SHIPPING_LINE>")
+                    .append("<ISO_CODE>ISO CODE</ISO_CODE>")
+                    .append("<BOOKING>BOOKING</BOOKING>")
+                    .append("<VESSEL>VESSEL</VESSEL>")
+                    .append("<VOYAGE>VOYAGE</VOYAGE>")
+                    .append("<HAZ_CLASS>HAZ CLASS</HAZ_CLASS>")
+                    .append("<DOC_REFERENCE>DOC REFERENCE</DOC_REFERENCE>")
+                    .append("<DOC_UPLOADED>DOC UPLOADED</DOC_UPLOADED>")
+                    .append("<APPROVED>APPROVED</APPROVED>")
+                    .append("<APPROVED_BY>APPROVED BY</APPROVED_BY>")
+                    .append("<APPROVED_TIME>APPROVED TIME</APPROVED_TIME>")
+                    .append("</TABLE>")
+            String[] gKeyArr = gKeyParam.toUpperCase().split(",")
+            for (String gkey : gKeyArr) {
+                Sql sqlHazCont = Sql.newInstance(url, user, password, driverClassName)
+                sqlHazCont.eachRow("""
+                                   select u.id container,
+                                          sl.id line_id,
+                                          et.iso_group,
+                                          eo.nbr booking,
+                                          v.id ship_id,
+                                          vvd.ob_vyg voyage,
+                                          hz.haz_class,
+                                          hz.filenames,
+                                          hz.creator,
+                                          hz.approved,
+                                          hz.approved_by,
+                                          hz.approved_time,
+                                          hz.id gkey
+                                     from VERSIANT_CSP_HAZARDOUSDOCS hz
+                                     join inv_unit u on u.gkey=hz.equse_gkey
+                                     join ref_bizunit_scoped sl on sl.gkey=u.line_op
+                                     join inv_unit_equip ue on ue.unit_gkey=u.gkey and ue.eq_role='PRIMARY'
+                                     join ref_equipment e on e.gkey=ue.eq_gkey
+                                     join ref_equip_type et on et.gkey=e.eqtyp_gkey
+                                     left join inv_eq_base_order_item eoi on eoi.gkey=ue.depart_order_item_gkey
+                                     left join inv_eq_base_order eo on eo.gkey=eoi.eqo_gkey
+                                     left join argo_carrier_visit cv on cv.gkey=eo.vessel_visit_gkey
+                                     left join vsl_vessel_visit_details vvd on vvd.vvd_gkey=cv.cvcvd_gkey
+                                     left join vsl_vessels v on v.gkey=vvd.vessel_gkey
+                                    where u.gkey = ${gkey}
+                                          """) {
+                    results.append("<TABLE>")
+                            .append("<CONTAINER>").append(it.CONTAINER).append("</CONTAINER>")
+                            .append("<SHIPPING_LINE>").append(it.LINE_ID).append("</SHIPPING_LINE>")
+                            .append("<ISO_CODE>").append(it.ISO_GROUP).append("</ISO_CODE>")
+                            .append("<BOOKING>").append(it.BOOKING).append("</BOOKING>")
+                            .append("<VESSEL>").append(it.SHIP_ID).append("</VESSEL>")
+                            .append("<VOYAGE>").append(it.VOYAGE).append("</VOYAGE>")
+                            .append("<HAZ_CLASS>").append(it.HAZ_CLASS).append("</HAZ_CLASS>")
+                            .append("<DOC_REFERENCE>").append(it.FILENAMES).append("</DOC_REFERENCE>")
+                            .append("<DOC_UPLOADED>").append(it.CREATOR).append("</DOC_UPLOADED>")
+                            .append("<APPROVED>").append(it.APPROVED).append("</APPROVED>")
+                            .append("<APPROVED_BY>").append(it.APPROVED_BY).append("</APPROVED_BY>")
+                            .append("<APPROVED_TIME>").append(it.APPROVED_TIME).append("</APPROVED_TIME>")
+                            .append("</TABLE>")
+                }
+            }
+            return results.toString().replace("null", "")
+        } else if (gvyClassParam.toUpperCase().equals("HAZDOWNLOADBYVESSEL")) {
+            StringBuilder results = new StringBuilder()
+            results.append("<TABLE>")
+                    .append("<CONTAINER>CONTAINER</CONTAINER>")
+                    .append("<SHIPPING_LINE>SHIPPING LINE</SHIPPING_LINE>")
+                    .append("<ISO_CODE>ISO CODE</ISO_CODE>")
+                    .append("<BOOKING>BOOKING</BOOKING>")
+                    .append("<VESSEL>VESSEL</VESSEL>")
+                    .append("<VOYAGE>VOYAGE</VOYAGE>")
+                    .append("<HAZ_CLASS>HAZ CLASS</HAZ_CLASS>")
+                    .append("<DOC_REFERENCE>DOC REFERENCE</DOC_REFERENCE>")
+                    .append("<DOC_UPLOADED>DOC UPLOADED</DOC_UPLOADED>")
+                    .append("<APPROVED>APPROVED</APPROVED>")
+                    .append("<APPROVED_BY>APPROVED BY</APPROVED_BY>")
+                    .append("<APPROVED_TIME>APPROVED TIME</APPROVED_TIME>")
+                    .append("</TABLE>")
+            String[] lineArr = lineParam.toUpperCase().split(",")
+            for (String line : lineArr) {
+                Sql sqlHazVes = Sql.newInstance(url, user, password, driverClassName)
+                sqlHazVes.eachRow("""
+                                   select u.id container,
+                                          sl.id line_id,
+                                          et.iso_group,
+                                          eo.nbr booking,
+                                          v.id ship_id,
+                                          vvd.ob_vyg voyage,
+                                          hz.haz_class,
+                                          hz.filenames,
+                                          hz.creator,
+                                          hz.approved,
+                                          hz.approved_by,
+                                          hz.approved_time,
+                                          hz.id gkey
+                                     from VERSIANT_CSP_HAZARDOUSDOCS hz
+                                     join inv_unit u on u.gkey=hz.equse_gkey
+                                     join ref_bizunit_scoped sl on sl.gkey=u.line_op
+                                     join inv_unit_equip ue on ue.unit_gkey=u.gkey and ue.eq_role='PRIMARY'
+                                     join ref_equipment e on e.gkey=ue.eq_gkey
+                                     join ref_equip_type et on et.gkey=e.eqtyp_gkey
+                                     left join inv_eq_base_order_item eoi on eoi.gkey=ue.depart_order_item_gkey
+                                     left join inv_eq_base_order eo on eo.gkey=eoi.eqo_gkey
+                                     left join argo_carrier_visit cv on cv.gkey=eo.vessel_visit_gkey
+                                     left join vsl_vessel_visit_details vvd on vvd.vvd_gkey=cv.cvcvd_gkey
+                                     left join vsl_vessels v on v.gkey=vvd.vessel_gkey
+                                    where sl.id = ${line}
+                                      and v.id = ${vesselParam}
+                                      and vvd.ob_vyg = ${voyageParam}
+                                          """) {
+                    results.append("<TABLE>")
+                            .append("<CONTAINER>").append(it.CONTAINER).append("</CONTAINER>")
+                            .append("<SHIPPING_LINE>").append(it.LINE_ID).append("</SHIPPING_LINE>")
+                            .append("<ISO_CODE>").append(it.ISO_GROUP).append("</ISO_CODE>")
+                            .append("<BOOKING>").append(it.BOOKING).append("</BOOKING>")
+                            .append("<VESSEL>").append(it.SHIP_ID).append("</VESSEL>")
+                            .append("<VOYAGE>").append(it.VOYAGE).append("</VOYAGE>")
+                            .append("<HAZ_CLASS>").append(it.HAZ_CLASS).append("</HAZ_CLASS>")
+                            .append("<DOC_REFERENCE>").append(it.FILENAMES).append("</DOC_REFERENCE>")
+                            .append("<DOC_UPLOADED>").append(it.CREATOR).append("</DOC_UPLOADED>")
+                            .append("<APPROVED>").append(it.APPROVED).append("</APPROVED>")
+                            .append("<APPROVED_BY>").append(it.APPROVED_BY).append("</APPROVED_BY>")
+                            .append("<APPROVED_TIME>").append(it.APPROVED_TIME).append("</APPROVED_TIME>")
+                            .append("</TABLE>")
+                }
+            }
+            return results.toString().replace("null", "")
+        } else if (gvyClassParam.toUpperCase().equals("DRAYSTATUS")) {
+            StringBuilder results = new StringBuilder()
+            Set<DrayStatusEnum> drays = DrayStatusEnum.getEnumList()
+            TreeSet<DrayStatusEnum> treeSet = new TreeSet<DrayStatusEnum>(new DrayComparator())
+            treeSet.addAll(drays)
+            for (DrayStatusEnum drayEnum in treeSet) {
+                String[] drayDescRes = drayEnum.getDescriptionResKey().split("\\.")
+                String drayDesc = drayDescRes[2]
+                results.append("<TABLE>")
+                        .append("<ID>").append(drayEnum.getKey()).append("</ID>")
+                        .append("<DESCRIPTION>").append(drayDesc).append("</DESCRIPTION>")
+                        .append("</TABLE>")
+            }
+            return results
+        } else if (gvyClassParam.toUpperCase().equals("TRUCKINGCOMPANIES")) {
+            StringBuilder results = new StringBuilder()
+            DomainQuery dq = QueryFactory.createDomainQuery(ArgoRefEntity.SCOPED_BIZ_UNIT)
+                    .addDqField(ArgoRefField.BZU_ID)
+                    .addDqField(ArgoRefField.BZU_NAME)
+                    .addDqField(ArgoRefField.BZU_SCAC)
+                    .addDqPredicate(PredicateFactory.eq(ArgoRefField.BZU_ROLE, BizRoleEnum.HAULIER))
+                    .addDqPredicate(PredicateFactory.eq(ArgoRefField.BZU_LIFE_CYCLE_STATE, LifeCycleStateEnum.ACTIVE))
+                    .addDqOrdering(Ordering.asc(ArgoRefField.BZU_ID))
+            QueryResult rs = HibernateApi.getInstance().findValuesByDomainQuery(dq)
+            List records = rs.getRetrievedResults()
+            for (int i = 0; i < records.size(); i++) {
+                String companyId = rs.getValue(i, 0)
+                String companyName = rs.getValue(i, 1)
+                String companyScac = rs.getValue(i, 2)
+                results.append("<TABLE>")
+                        .append("<ID>").append(companyId).append("</ID>")
+                        .append("<SCAC>").append(companyScac).append("</SCAC>")
+                        .append("<DESCRIPTION>").append(companyName).append("</DESCRIPTION>")
+                        .append("</TABLE>")
+            }
+            return results.toString().replace("null", "")
+        } else if (gvyClassParam.toUpperCase().equals("SHIPPERS")) {
+            StringBuilder results = new StringBuilder()
+            DomainQuery dq = QueryFactory.createDomainQuery(ArgoRefEntity.SHIPPER)
+                    .addDqPredicate(PredicateFactory.like(ArgoRefField.BZU_NAME, '%' + shipperParam.toUpperCase() + '%'))
+            Set<Shipper> shipperSet = HibernateApi.getInstance().findEntitiesByDomainQuery(dq)
+            for (Shipper shipper in shipperSet) {
+                results.append("<TABLE>")
+                        .append("<ID>").append(shipper.getBzuId()).append("</ID>")
+                        .append("<NAME>").append(shipper.getBzuName()).append("</NAME>")
+                        .append("</TABLE>")
+            }
+            return results.toString().replace("null", "")
+        } else if (gvyClassParam.toUpperCase().equals("SPECIALSTOWS")) {
+            StringBuilder results = new StringBuilder()
+            DomainQuery dq = QueryFactory.createDomainQuery(ArgoRefEntity.SPECIAL_STOW)
+                    .setDqFieldsDistinct()
+                    .addDqField(ArgoRefField.STW_ID)
+                    .addDqField(ArgoRefField.STW_DESCRIPTION)
+                    .addDqOrdering(Ordering.asc(ArgoRefField.STW_ID))
+            QueryResult rs = HibernateApi.getInstance().findValuesByDomainQuery(dq)
+            List records = rs.getRetrievedResults()
+            for (int i = 0; i < records.size(); i++) {
+                String stowId = rs.getValue(i, 0)
+                String stowDesc = rs.getValue(i, 1)
+                results.append("<TABLE>")
+                        .append("<ID>").append(stowId).append("</ID>")
+                        .append("<DESCRIPTION>").append(stowDesc).append("</DESCRIPTION>")
+                        .append("</TABLE>")
+            }
+            return results.toString().replace("null", "")
+        } else if (gvyClassParam.toUpperCase().equals("APPROVEHAZARDS")) {
+            String results
+            Sql sqlUpdateHaz = Sql.newInstance(url, user, password, driverClassName)
+            String approveHaz = """
+                         update VERSIANT_CSP_HAZARDOUSDOCS
+                            set approved='X',
+                                approved_by='${userParam}',
+                                approved_time=sysdate
+                          where id='${gKeyParam}'
+                         """
+            sqlUpdateHaz.executeUpdate(approveHaz)
+            Sql sqlGetUnitId = Sql.newInstance(url, user, password, driverClassName)
+            sqlGetUnitId.eachRow("""
+                         select equse_gkey
+                           from VERSIANT_CSP_HAZARDOUSDOCS
+                          where id='${gKeyParam}'
+                         """) {
+                Unit unit = Unit.hydrate(it.EQUSE_GKEY.toLong())
+                DomainQuery dq = QueryFactory.createDomainQuery(ServicesEntity.EVENT_TYPE)
+                        .addDqPredicate(PredicateFactory.eq(ServicesField.EVNTTYPE_ID, "HAZARDOUS_PAPERWORK"))
+                List<EventType> eventTypeSet = HibernateApi.getInstance().findEntitiesByDomainQuery(dq)
+                EventType eventType = eventTypeSet.get(0)
+                unit.recordUnitEvent(eventType, null, null)
+            }
+            results = "Hazardous Document Approved"
+            return results
+        } else {
+            return "Error:  Class Parameter not recognized"
+        }
+    }
+}
+
+private class GkeyComparator implements Comparator<ServiceImpediment> {
+    public int compare(ServiceImpediment s1, ServiceImpediment s2) {
+        return s1.getFlagGkey().toString().concat(s1.getFlagType().getId()).compareTo(s2.getFlagGkey().toString().concat(s2.getFlagType().getId())) * -1
+    }
+}
+
+private class DrayComparator implements Comparator<DrayStatusEnum> {
+    public int compare(DrayStatusEnum s1, DrayStatusEnum s2) {
+        return s1.getKey().compareTo(s2.getKey())
+    }
+}
+
+private class ScopedBizUnitComparator implements Comparator<ScopedBizUnit> {
+    public int compare(ScopedBizUnit s1, ScopedBizUnit s2) {
+        return s1.getBzuId().compareTo(s2.getBzuId())
+    }
+}
